@@ -1304,6 +1304,11 @@ export interface MainThreadNotebookRenderersShape extends IDisposable {
 export interface MainThreadInteractiveShape extends IDisposable {
 }
 
+export interface ISpeechToTextConsumerOptions {
+	language?: string;
+	context?: string;
+}
+
 export interface MainThreadSpeechShape extends IDisposable {
 	$registerProvider(handle: number, identifier: string, metadata: ISpeechProviderMetadata): void;
 	$unregisterProvider(handle: number): void;
@@ -1311,6 +1316,11 @@ export interface MainThreadSpeechShape extends IDisposable {
 	$emitSpeechToTextEvent(session: number, event: ISpeechToTextEvent): void;
 	$emitTextToSpeechEvent(session: number, event: ITextToSpeechEvent): void;
 	$emitKeywordRecognitionEvent(session: number, event: IKeywordRecognitionEvent): void;
+
+	// Consumer API - Extensions calling into ISpeechService
+	$createConsumerSpeechToTextSession(sessionId: number, options?: ISpeechToTextConsumerOptions): Promise<void>;
+	$cancelConsumerSpeechToTextSession(sessionId: number): Promise<void>;
+	$hasSpeechProvider(): Promise<boolean>;
 }
 
 export interface ExtHostSpeechShape {
@@ -1323,6 +1333,11 @@ export interface ExtHostSpeechShape {
 
 	$createKeywordRecognitionSession(handle: number, session: number): Promise<void>;
 	$cancelKeywordRecognitionSession(session: number): Promise<void>;
+
+	// Consumer API - MainThread callbacks to ExtHost
+	$onConsumerSpeechToTextEvent(sessionId: number, event: ISpeechToTextEvent): void;
+	$onConsumerSpeechToTextSessionEnd(sessionId: number, error?: SerializedError): void;
+	$onDidChangeSpeechProviderAvailability(available: boolean): void;
 }
 
 export interface MainThreadLanguageModelsShape extends IDisposable {

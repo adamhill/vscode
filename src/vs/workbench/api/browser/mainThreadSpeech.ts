@@ -3,12 +3,14 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import { CancellationTokenSource } from '../../../base/common/cancellation.js';
 import { raceCancellation } from '../../../base/common/async.js';
 import { Emitter, Event } from '../../../base/common/event.js';
-import { DisposableStore, IDisposable } from '../../../base/common/lifecycle.js';
+import { transformErrorForSerialization } from '../../../base/common/errors.js';
+import { DisposableStore, IDisposable, toDisposable } from '../../../base/common/lifecycle.js';
 import { ILogService } from '../../../platform/log/common/log.js';
-import { ExtHostContext, ExtHostSpeechShape, MainContext, MainThreadSpeechShape } from '../common/extHost.protocol.js';
-import { IKeywordRecognitionEvent, ISpeechProviderMetadata, ISpeechService, ISpeechToTextEvent, ITextToSpeechEvent, TextToSpeechStatus } from '../../contrib/speech/common/speechService.js';
+import { ExtHostContext, ExtHostSpeechShape, ISpeechToTextConsumerOptions, MainContext, MainThreadSpeechShape } from '../common/extHost.protocol.js';
+import { IKeywordRecognitionEvent, ISpeechProviderMetadata, ISpeechService, ISpeechToTextEvent, ITextToSpeechEvent, SpeechToTextStatus, TextToSpeechStatus } from '../../contrib/speech/common/speechService.js';
 import { IExtHostContext, extHostNamedCustomer } from '../../services/extensions/common/extHostCustomers.js';
 
 type SpeechToTextSession = {
@@ -23,6 +25,11 @@ type KeywordRecognitionSession = {
 	readonly onDidChange: Emitter<IKeywordRecognitionEvent>;
 };
 
+type ConsumerSpeechToTextSession = {
+	readonly cts: CancellationTokenSource;
+	readonly disposables: DisposableStore;
+};
+
 @extHostNamedCustomer(MainContext.MainThreadSpeech)
 export class MainThreadSpeech implements MainThreadSpeechShape {
 
@@ -34,12 +41,21 @@ export class MainThreadSpeech implements MainThreadSpeechShape {
 	private readonly textToSpeechSessions = new Map<number, TextToSpeechSession>();
 	private readonly keywordRecognitionSessions = new Map<number, KeywordRecognitionSession>();
 
+	// Consumer session tracking
+	private readonly consumerSpeechToTextSessions = new Map<number, ConsumerSpeechToTextSession>();
+	private readonly hasSpeechProviderListener: IDisposable;
+
 	constructor(
 		extHostContext: IExtHostContext,
 		@ISpeechService private readonly speechService: ISpeechService,
 		@ILogService private readonly logService: ILogService
 	) {
 		this.proxy = extHostContext.getProxy(ExtHostContext.ExtHostSpeech);
+
+		// Listen for provider availability changes
+		this.hasSpeechProviderListener = this.speechService.onDidChangeHasSpeechProvider(() => {
+			this.proxy.$onDidChangeSpeechProviderAvailability(this.speechService.hasSpeechProvider);
+		});
 	}
 
 	$registerProvider(handle: number, identifier: string, metadata: ISpeechProviderMetadata): void {
@@ -163,6 +179,71 @@ export class MainThreadSpeech implements MainThreadSpeechShape {
 		providerSession?.onDidChange.fire(event);
 	}
 
+	// Consumer API Implementation
+
+	async $createConsumerSpeechToTextSession(sessionId: number, options?: ISpeechToTextConsumerOptions): Promise<void> {
+		this.logService.trace('[Speech] Extension creating consumer speech-to-text session', sessionId);
+
+		if (!this.speechService.hasSpeechProvider) {
+			throw new Error('No speech provider available');
+		}
+
+		const disposables = new DisposableStore();
+		const cts = new CancellationTokenSource();
+		disposables.add(toDisposable(() => cts.dispose(true)));
+
+		// Store session for cancellation
+		this.consumerSpeechToTextSessions.set(sessionId, { cts, disposables });
+
+		try {
+			// Create session using internal speech service
+			const session = await this.speechService.createSpeechToTextSession(
+				cts.token,
+				options?.context ?? 'extension'
+			);
+
+			// Forward all events to ExtHost
+			disposables.add(session.onDidChange(event => {
+				if (cts.token.isCancellationRequested) {
+					return;
+				}
+
+				this.proxy.$onConsumerSpeechToTextEvent(sessionId, event);
+
+				// Check for terminal states
+				if (event.status === SpeechToTextStatus.Stopped || event.status === SpeechToTextStatus.Error) {
+					this.cleanupConsumerSession(sessionId);
+					this.proxy.$onConsumerSpeechToTextSessionEnd(
+						sessionId,
+						event.status === SpeechToTextStatus.Error
+							? transformErrorForSerialization(new Error(event.text ?? 'Speech recognition error'))
+							: undefined
+					);
+				}
+			}));
+		} catch (error) {
+			this.cleanupConsumerSession(sessionId);
+			throw error;
+		}
+	}
+
+	async $cancelConsumerSpeechToTextSession(sessionId: number): Promise<void> {
+		this.logService.trace('[Speech] Extension cancelling consumer speech-to-text session', sessionId);
+		this.cleanupConsumerSession(sessionId);
+	}
+
+	async $hasSpeechProvider(): Promise<boolean> {
+		return this.speechService.hasSpeechProvider;
+	}
+
+	private cleanupConsumerSession(sessionId: number): void {
+		const session = this.consumerSpeechToTextSessions.get(sessionId);
+		if (session) {
+			session.disposables.dispose();
+			this.consumerSpeechToTextSessions.delete(sessionId);
+		}
+	}
+
 	dispose(): void {
 		this.providerRegistrations.forEach(disposable => disposable.dispose());
 		this.providerRegistrations.clear();
@@ -175,5 +256,12 @@ export class MainThreadSpeech implements MainThreadSpeechShape {
 
 		this.keywordRecognitionSessions.forEach(session => session.onDidChange.dispose());
 		this.keywordRecognitionSessions.clear();
+
+		// Clean up consumer sessions
+		this.hasSpeechProviderListener.dispose();
+		for (const session of this.consumerSpeechToTextSessions.values()) {
+			session.disposables.dispose();
+		}
+		this.consumerSpeechToTextSessions.clear();
 	}
 }

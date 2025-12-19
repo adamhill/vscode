@@ -1624,6 +1624,15 @@ export function createApiFactoryAndRegisterActors(accessor: ServicesAccessor): I
 			registerSpeechProvider(id: string, provider: vscode.SpeechProvider) {
 				checkProposedApiEnabled(extension, 'speech');
 				return extHostSpeech.registerProvider(extension.identifier, id, provider);
+			},
+			get hasSpeechProvider(): boolean {
+				return extHostSpeech.hasSpeechProvider;
+			},
+			get onDidChangeSpeechProvider(): vscode.Event<void> {
+				return extHostSpeech.onDidChangeSpeechProvider;
+			},
+			startSpeechToTextSession(options?: vscode.SpeechToTextOptions): Thenable<vscode.SpeechToTextSession> {
+				return extHostSpeech.startSpeechToTextSession(extension, options);
 			}
 		};
 
