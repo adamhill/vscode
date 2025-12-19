@@ -1,0 +1,203 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+body {
+	padding-top: var(--container-padding);
+}
+
+/* Provider unavailable message */
+.provider-message {
+	text-align: center;
+	padding: 20px;
+	margin-bottom: 16px;
+	background-color: var(--vscode-inputValidation-warningBackground);
+	border: 1px solid var(--vscode-inputValidation-warningBorder);
+	border-radius: 4px;
+}
+
+.provider-icon {
+	font-size: 32px;
+	margin-bottom: 12px;
+	color: var(--vscode-editorWarning-foreground);
+}
+
+.provider-message p {
+	margin-bottom: 8px;
+}
+
+.provider-link {
+	margin-top: 12px;
+}
+
+.provider-link a {
+	display: inline-block;
+	padding: 6px 12px;
+	background-color: var(--vscode-button-background);
+	color: var(--vscode-button-foreground);
+	border-radius: 4px;
+	text-decoration: none;
+}
+
+.provider-link a:hover {
+	background-color: var(--vscode-button-hoverBackground);
+	text-decoration: none;
+}
+
+/* Controls */
+.controls {
+	display: flex;
+	gap: 8px;
+	margin-bottom: 12px;
+	align-items: center;
+}
+
+.mic-button {
+	width: 48px;
+	height: 48px;
+	border-radius: 50%;
+	font-size: 20px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	transition: all 0.2s ease;
+}
+
+.mic-button:hover:not(:disabled) {
+	transform: scale(1.05);
+}
+
+.mic-button.listening {
+	background-color: var(--vscode-inputValidation-errorBackground);
+	border: 2px solid var(--vscode-inputValidation-errorBorder);
+	animation: pulse 1.5s infinite;
+}
+
+.mic-button.listening:hover {
+	background-color: var(--vscode-inputValidation-errorBackground);
+}
+
+@keyframes pulse {
+	0% {
+		box-shadow: 0 0 0 0 rgba(255, 0, 0, 0.4);
+	}
+	70% {
+		box-shadow: 0 0 0 10px rgba(255, 0, 0, 0);
+	}
+	100% {
+		box-shadow: 0 0 0 0 rgba(255, 0, 0, 0);
+	}
+}
+
+.clear-button {
+	width: 32px;
+	height: 32px;
+	border-radius: 4px;
+	font-size: 16px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	background: var(--vscode-button-secondaryBackground);
+	color: var(--vscode-button-secondaryForeground);
+}
+
+.clear-button:hover {
+	background: var(--vscode-button-secondaryHoverBackground);
+}
+
+/* Recording indicator */
+.recording-indicator {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	margin-bottom: 12px;
+	padding: 8px 12px;
+	background-color: var(--vscode-inputValidation-infoBackground);
+	border: 1px solid var(--vscode-inputValidation-infoBorder);
+	border-radius: 4px;
+}
+
+.recording-dot {
+	width: 10px;
+	height: 10px;
+	border-radius: 50%;
+	background-color: #ff4444;
+	animation: blink 1s infinite;
+}
+
+@keyframes blink {
+	0%, 50% {
+		opacity: 1;
+	}
+	51%, 100% {
+		opacity: 0.3;
+	}
+}
+
+.recording-text {
+	font-size: 12px;
+	color: var(--vscode-foreground);
+}
+
+/* Interim text */
+.interim-text {
+	padding: 8px 12px;
+	margin-bottom: 12px;
+	background-color: var(--vscode-editor-background);
+	border: 1px dashed var(--vscode-input-border);
+	border-radius: 4px;
+	font-style: italic;
+	color: var(--vscode-descriptionForeground);
+	min-height: 36px;
+}
+
+/* Transcript container */
+.transcript-container {
+	flex: 1;
+	min-height: 200px;
+	margin-bottom: 12px;
+}
+
+.transcript {
+	width: 100%;
+	min-height: 200px;
+	max-height: 400px;
+	padding: 12px;
+	background-color: var(--vscode-input-background);
+	border: 1px solid var(--vscode-input-border);
+	border-radius: 4px;
+	color: var(--vscode-input-foreground);
+	font-family: var(--vscode-editor-font-family);
+	font-size: var(--vscode-editor-font-size);
+	line-height: 1.5;
+	overflow-y: auto;
+	white-space: pre-wrap;
+	word-wrap: break-word;
+}
+
+.transcript:empty::before {
+	content: attr(placeholder);
+	color: var(--vscode-input-placeholderForeground);
+	font-style: italic;
+}
+
+/* Status message */
+.status-message {
+	padding: 8px 12px;
+	border-radius: 4px;
+	font-size: 12px;
+	margin-top: 8px;
+}
+
+.status-message.info {
+	background-color: var(--vscode-inputValidation-infoBackground);
+	border: 1px solid var(--vscode-inputValidation-infoBorder);
+	color: var(--vscode-inputValidation-infoForeground);
+}
+
+.status-message.error {
+	background-color: var(--vscode-inputValidation-errorBackground);
+	border: 1px solid var(--vscode-inputValidation-errorBorder);
+	color: var(--vscode-inputValidation-errorForeground);
+}
