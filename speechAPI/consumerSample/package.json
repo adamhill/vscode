@@ -1,0 +1,70 @@
+{
+	"name": "speech-consumer-sample",
+	"displayName": "Speech Consumer Sample",
+	"description": "Sample extension demonstrating the VS Code Speech Consumer API",
+	"version": "0.0.1",
+	"publisher": "vscode-samples",
+	"private": true,
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/microsoft/vscode-extension-samples"
+	},
+	"engines": {
+		"vscode": "^1.96.0"
+	},
+	"categories": [
+		"Other"
+	],
+	"activationEvents": [],
+	"main": "./out/extension.js",
+	"enabledApiProposals": [
+		"speechConsumer"
+	],
+	"contributes": {
+		"viewsContainers": {
+			"activitybar": [
+				{
+					"id": "speech-consumer",
+					"title": "Speech",
+					"icon": "media/mic.svg"
+				}
+			]
+		},
+		"views": {
+			"speech-consumer": [
+				{
+					"type": "webview",
+					"id": "speechConsumer.transcriptionView",
+					"name": "Transcription"
+				}
+			]
+		},
+		"commands": [
+			{
+				"command": "speechConsumer.startListening",
+				"title": "Start Listening",
+				"category": "Speech Consumer"
+			},
+			{
+				"command": "speechConsumer.stopListening",
+				"title": "Stop Listening",
+				"category": "Speech Consumer"
+			}
+		]
+	},
+	"scripts": {
+		"vscode:prepublish": "npm run compile",
+		"compile": "tsc -p ./",
+		"watch": "tsc -watch -p ./",
+		"lint": "eslint src"
+	},
+	"devDependencies": {
+		"@types/vscode": "^1.96.0",
+		"@types/node": "^20.0.0",
+		"typescript": "^5.4.0"
+	},
+	"dependencies": {
+		"@vscode/codicons": "^0.0.36"
+	}
+}
