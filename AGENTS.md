@@ -98,10 +98,10 @@ extensions/my-extension/
 #### API Tests (in `extensions/vscode-api-tests/`)
 These test the VS Code Extension API itself:
 ```bash
-# Run API tests for single folder workspace
-./scripts/test-integration.sh  # Runs as part of integration suite
+# Run full integration suite (includes API tests for single folder workspace)
+./scripts/test-integration.sh
 
-# Run specific extension tests
+# Run only the API test extension
 npm run test-extension -- -l vscode-api-tests
 ```
 
