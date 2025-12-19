@@ -60,6 +60,7 @@ import { IAgentSession } from './agentSessions/agentSessionsModel.js';
 
 interface IChatViewPaneState extends Partial<IChatModelInputState> {
 	sessionId?: string;
+	sessionsViewerLimited?: boolean;
 }
 
 type ChatViewPaneOpenedClassification = {
@@ -117,6 +118,7 @@ export class ChatViewPane extends ViewPane implements IViewWelcomeDelegate {
 		) {
 			this.viewState.sessionId = undefined; // clear persisted session on fresh start
 		}
+		this.sessionsViewerLimited = this.viewState.sessionsViewerLimited ?? true;
 
 		// Contextkeys
 		this.chatViewLocationContext = ChatContextKeys.panelLocation.bindTo(contextKeyService);
@@ -367,6 +369,9 @@ export class ChatViewPane extends ViewPane implements IViewWelcomeDelegate {
 				const { position } = this.getViewPositionAndLocation();
 				return position === Position.RIGHT ? HoverPosition.LEFT : HoverPosition.RIGHT;
 			},
+			trackActiveEditorSession: () => {
+				return !this._widget || this._widget.isEmpty(); // only track and reveal if chat widget is empty
+			},
 			overrideCompare(sessionA: IAgentSession, sessionB: IAgentSession): number | undefined {
 
 				// When limited where only few sessions show, sort unread sessions to the top
@@ -397,8 +402,9 @@ export class ChatViewPane extends ViewPane implements IViewWelcomeDelegate {
 		}, {
 			opener: () => {
 				this.sessionsViewerLimited = !this.sessionsViewerLimited;
+				this.viewState.sessionsViewerLimited = this.sessionsViewerLimited;
 
-				this.notifySessionsControlLimitedChanged(true);
+				this.notifySessionsControlLimitedChanged(true /* layout */, true /* update */);
 
 				sessionsControl.focus();
 			}
@@ -445,7 +451,7 @@ export class ChatViewPane extends ViewPane implements IViewWelcomeDelegate {
 		}
 	}
 
-	private notifySessionsControlLimitedChanged(triggerLayout: boolean): Promise<void> {
+	private notifySessionsControlLimitedChanged(triggerLayout: boolean, triggerUpdate: boolean): Promise<void> {
 		this.sessionsViewerLimitedContext.set(this.sessionsViewerLimited);
 
 		this.updateSessionsControlTitle();
@@ -457,7 +463,7 @@ export class ChatViewPane extends ViewPane implements IViewWelcomeDelegate {
 			};
 		}
 
-		const updatePromise = this.sessionsControl?.update();
+		const updatePromise = triggerUpdate ? this.sessionsControl?.update() : undefined;
 
 		if (triggerLayout && this.lastDimensions) {
 			this.layoutBody(this.lastDimensions.height, this.lastDimensions.width);
@@ -841,11 +847,15 @@ export class ChatViewPane extends ViewPane implements IViewWelcomeDelegate {
 		// Update limited state based on orientation change
 		if (oldSessionsViewerOrientation !== this.sessionsViewerOrientation) {
 			const oldSessionsViewerLimited = this.sessionsViewerLimited;
-			this.sessionsViewerLimited = this.sessionsViewerOrientation === AgentSessionsViewerOrientation.Stacked;
+			if (this.sessionsViewerOrientation === AgentSessionsViewerOrientation.SideBySide) {
+				this.sessionsViewerLimited = false; // side by side always shows all
+			} else {
+				this.sessionsViewerLimited = this.viewState.sessionsViewerLimited ?? true;
+			}
 
 			let updatePromise: Promise<void>;
 			if (oldSessionsViewerLimited !== this.sessionsViewerLimited) {
-				updatePromise = this.notifySessionsControlLimitedChanged(false /* already in layout */);
+				updatePromise = this.notifySessionsControlLimitedChanged(false /* already in layout */, true /* update */);
 			} else {
 				updatePromise = this.sessionsControl?.update(); // still need to update for section visibility
 			}
