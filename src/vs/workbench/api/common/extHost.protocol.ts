@@ -1308,6 +1308,13 @@ export interface MainThreadNotebookRenderersShape extends IDisposable {
 
 export interface MainThreadInteractiveShape extends IDisposable {
 }
+/**
+ * Options for consuming speech-to-text functionality from extensions
+ */
+export interface ISpeechToTextConsumerOptions {
+	language?: string;
+	context?: string;
+}
 
 export interface MainThreadSpeechShape extends IDisposable {
 	$registerProvider(handle: number, identifier: string, metadata: ISpeechProviderMetadata): void;
@@ -1316,6 +1323,20 @@ export interface MainThreadSpeechShape extends IDisposable {
 	$emitSpeechToTextEvent(session: number, event: ISpeechToTextEvent): void;
 	$emitTextToSpeechEvent(session: number, event: ITextToSpeechEvent): void;
 	$emitKeywordRecognitionEvent(session: number, event: IKeywordRecognitionEvent): void;
+
+	// Consumer API - Extensions calling into ISpeechService
+	/**
+	 * Creates a consumer speech-to-text session for an extension to consume internal speech services
+	 */
+	$createConsumerSpeechToTextSession(sessionId: number, options?: ISpeechToTextConsumerOptions): Promise<void>;
+	/**
+	 * Cancels an active consumer speech-to-text session
+	 */
+	$cancelConsumerSpeechToTextSession(sessionId: number): Promise<void>;
+	/**
+	 * Checks if a speech provider is currently available
+	 */
+	$hasSpeechProvider(): Promise<boolean>;
 }
 
 export interface ExtHostSpeechShape {
@@ -1328,6 +1349,20 @@ export interface ExtHostSpeechShape {
 
 	$createKeywordRecognitionSession(handle: number, session: number): Promise<void>;
 	$cancelKeywordRecognitionSession(session: number): Promise<void>;
+
+	// Consumer API - MainThread callbacks to ExtHost
+	/**
+	 * Receives speech-to-text events from the consumer session
+	 */
+	$onConsumerSpeechToTextEvent(sessionId: number, event: ISpeechToTextEvent): void;
+	/**
+	 * Notifies when a consumer speech-to-text session ends
+	 */
+	$onConsumerSpeechToTextSessionEnd(sessionId: number, error?: SerializedError): void;
+	/**
+	 * Notifies when speech provider availability changes
+	 */
+	$onDidChangeSpeechProviderAvailability(available: boolean): void;
 }
 
 export interface MainThreadLanguageModelsShape extends IDisposable {

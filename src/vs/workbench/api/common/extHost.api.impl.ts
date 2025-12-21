@@ -1684,6 +1684,28 @@ export function createApiFactoryAndRegisterActors(accessor: ServicesAccessor): I
 			registerSpeechProvider(id: string, provider: vscode.SpeechProvider) {
 				checkProposedApiEnabled(extension, 'speech');
 				return extHostSpeech.registerProvider(extension.identifier, id, provider);
+			},
+			/**
+			 * Indicates whether a speech provider is currently available.
+			 */
+			get hasSpeechProvider(): boolean {
+				return extHostSpeech.hasSpeechProvider;
+			},
+			/**
+			 * An event that fires when the availability of a speech provider changes.
+			 */
+			get onDidChangeSpeechProvider(): vscode.Event<void> {
+				return extHostSpeech.onDidChangeSpeechProvider;
+			},
+			/**
+			 * Creates a new speech-to-text session.
+			 * @param options - Optional configuration for the speech-to-text session.
+			 * @returns A promise that resolves to a speech-to-text session.
+			 */
+			createSpeechToTextSession(options?: vscode.SpeechToTextOptions): vscode.SpeechToTextSession {
+				checkProposedApiEnabled(extension, 'speechConsumer');
+				// The consumer API uses a different SpeechToTextSession interface than the provider API
+				return extHostSpeech.createSpeechToTextSessionSync(extension, options) as vscode.SpeechToTextSession;
 			}
 		};
 
