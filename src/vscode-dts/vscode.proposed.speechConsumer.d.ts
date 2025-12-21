@@ -1,0 +1,18 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+declare module 'vscode' {
+
+	export interface SpeechToTextSession {
+		readonly events: AsyncIterable<SpeechToTextEvent>;
+		dispose(): void;
+	}
+
+	export namespace speech {
+		export const hasSpeechProvider: boolean;
+		export const onDidChangeSpeechProvider: Event<void>;
+		export function createSpeechToTextSession(options?: SpeechToTextOptions): SpeechToTextSession;
+	}
+}
