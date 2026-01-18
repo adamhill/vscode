@@ -29,7 +29,7 @@ import { ILogService } from '../../../../../platform/log/common/log.js';
 import { CellUri, ICellEditOperation } from '../../../notebook/common/notebookCommon.js';
 import { ChatRequestToolReferenceEntry, IChatRequestVariableEntry } from '../attachments/chatVariableEntries.js';
 import { migrateLegacyTerminalToolSpecificData } from '../chat.js';
-import { ChatAgentVoteDirection, ChatAgentVoteDownReason, ChatResponseClearToPreviousToolInvocationReason, ElicitationState, IChatAgentMarkdownContentWithVulnerability, IChatClearToPreviousToolInvocation, IChatCodeCitation, IChatCommandButton, IChatConfirmation, IChatContentInlineReference, IChatContentReference, IChatEditingSessionAction, IChatElicitationRequest, IChatElicitationRequestSerialized, IChatExtensionsContent, IChatFollowup, IChatLocationData, IChatMarkdownContent, IChatMcpServersStarting, IChatMcpServersStartingSerialized, IChatModelReference, IChatMultiDiffData, IChatMultiDiffDataSerialized, IChatNotebookEdit, IChatPrepareToolInvocationPart, IChatProgress, IChatProgressMessage, IChatPullRequestContent, IChatResponseCodeblockUriPart, IChatResponseProgressFileTreeData, IChatService, IChatSessionContext, IChatSessionTiming, IChatTask, IChatTaskSerialized, IChatTextEdit, IChatThinkingPart, IChatToolInvocation, IChatToolInvocationSerialized, IChatTreeData, IChatUndoStop, IChatUsedContext, IChatWarningMessage, ResponseModelState, isIUsedContext } from '../chatService/chatService.js';
+import { ChatAgentVoteDirection, ChatAgentVoteDownReason, ChatResponseClearToPreviousToolInvocationReason, ElicitationState, IChatAgentMarkdownContentWithVulnerability, IChatClearToPreviousToolInvocation, IChatCodeCitation, IChatCommandButton, IChatConfirmation, IChatContentInlineReference, IChatContentReference, IChatEditingSessionAction, IChatElicitationRequest, IChatElicitationRequestSerialized, IChatExtensionsContent, IChatFollowup, IChatLocationData, IChatMarkdownContent, IChatMcpServersStarting, IChatMcpServersStartingSerialized, IChatModelReference, IChatMultiDiffData, IChatMultiDiffDataSerialized, IChatNotebookEdit, IChatProgress, IChatProgressMessage, IChatPullRequestContent, IChatResponseCodeblockUriPart, IChatResponseProgressFileTreeData, IChatService, IChatSessionContext, IChatSessionTiming, IChatTask, IChatTaskSerialized, IChatTextEdit, IChatThinkingPart, IChatToolInvocation, IChatToolInvocationSerialized, IChatTreeData, IChatUndoStop, IChatUsedContext, IChatWarningMessage, ResponseModelState, isIUsedContext } from '../chatService/chatService.js';
 import { ChatAgentLocation, ChatModeKind } from '../constants.js';
 import { IChatEditingService, IChatEditingSession, ModifiedFileEntryState } from '../editing/chatEditingService.js';
 import { ILanguageModelChatMetadata, ILanguageModelChatMetadataAndIdentifier } from '../languageModels.js';
@@ -52,7 +52,7 @@ export function getAttachableImageExtension(mimeType: string): string | undefine
 }
 
 export interface IChatRequestVariableData {
-	variables: IChatRequestVariableEntry[];
+	variables: readonly IChatRequestVariableEntry[];
 }
 
 export namespace IChatRequestVariableData {
@@ -64,6 +64,7 @@ export namespace IChatRequestVariableData {
 export interface IChatRequestModel {
 	readonly id: string;
 	readonly timestamp: number;
+	readonly version: number;
 	readonly modeInfo?: IChatRequestModeInfo;
 	readonly session: IChatModel;
 	readonly message: IParsedChatRequest;
@@ -155,7 +156,6 @@ export type IChatProgressResponseContent =
 	| IChatToolInvocationSerialized
 	| IChatMultiDiffData
 	| IChatUndoStop
-	| IChatPrepareToolInvocationPart
 	| IChatElicitationRequest
 	| IChatElicitationRequestSerialized
 	| IChatClearToPreviousToolInvocation
@@ -170,7 +170,7 @@ export type IChatProgressResponseContentSerialized = Exclude<IChatProgressRespon
 	| IChatMcpServersStarting
 >;
 
-const nonHistoryKinds = new Set(['toolInvocation', 'toolInvocationSerialized', 'undoStop', 'prepareToolInvocation']);
+const nonHistoryKinds = new Set(['toolInvocation', 'toolInvocationSerialized', 'undoStop']);
 function isChatProgressHistoryResponseContent(content: IChatProgressResponseContent): content is IChatProgressHistoryResponseContent {
 	return !nonHistoryKinds.has(content.kind);
 }
@@ -330,6 +330,7 @@ export class ChatRequestModel implements IChatRequestModel {
 	}
 
 	public set variableData(v: IChatRequestVariableData) {
+		this._version++;
 		this._variableData = v;
 	}
 
@@ -347,6 +348,11 @@ export class ChatRequestModel implements IChatRequestModel {
 
 	public get editedFileEvents(): IChatAgentEditedFileEvent[] | undefined {
 		return this._editedFileEvents;
+	}
+
+	private _version = 0;
+	public get version(): number {
+		return this._version;
 	}
 
 	constructor(params: IChatRequestModelParameters) {
@@ -439,7 +445,6 @@ class AbstractResponse implements IResponse {
 				case 'extensions':
 				case 'pullRequest':
 				case 'undoStop':
-				case 'prepareToolInvocation':
 				case 'elicitation2':
 				case 'elicitationSerialized':
 				case 'thinking':
@@ -1011,9 +1016,12 @@ export class ChatResponseModel extends Disposable implements IChatResponseModel 
 			signal.read(r);
 
 			for (const part of this._response.value) {
-				if (part.kind === 'toolInvocation' && part.state.read(r).type === IChatToolInvocation.StateKind.WaitingForConfirmation) {
-					const title = part.confirmationMessages?.title;
-					return title ? (isMarkdownString(title) ? title.value : title) : undefined;
+				if (part.kind === 'toolInvocation') {
+					const state = part.state.read(r);
+					if (state.type === IChatToolInvocation.StateKind.WaitingForConfirmation) {
+						const title = state.confirmationMessages?.title;
+						return title ? (isMarkdownString(title) ? title.value : title) : undefined;
+					}
 				}
 				if (part.kind === 'confirmation' && !part.isUsed) {
 					return part.title;
@@ -1801,10 +1809,14 @@ export class ChatModel extends Disposable implements IChatModel {
 	}
 
 	get timing(): IChatSessionTiming {
-		const lastResponse = this._requests.at(-1)?.response;
+		const lastRequest = this._requests.at(-1);
+		const lastResponse = lastRequest?.response;
+		const lastRequestStarted = lastRequest?.timestamp;
+		const lastRequestEnded = lastResponse?.completedAt ?? lastResponse?.timestamp;
 		return {
-			startTime: this._timestamp,
-			endTime: lastResponse?.completedAt ?? lastResponse?.timestamp
+			created: this._timestamp,
+			lastRequestStarted,
+			lastRequestEnded,
 		};
 	}
 
@@ -2050,7 +2062,7 @@ export class ChatModel extends Disposable implements IChatModel {
 						agent,
 						slashCommand: raw.slashCommand,
 						requestId: request.id,
-						modelState: raw.modelState || { value: raw.isCanceled ? ResponseModelState.Cancelled : ResponseModelState.Complete, completedAt: Date.now() },
+						modelState,
 						vote: raw.vote,
 						timestamp: raw.timestamp,
 						voteDownReason: raw.voteDownReason,

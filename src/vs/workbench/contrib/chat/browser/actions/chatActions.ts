@@ -948,9 +948,12 @@ MenuRegistry.appendMenuItem(MenuId.CommandCenter, {
 			ChatContextKeys.Setup.disabled.negate()
 		),
 		ContextKeyExpr.has('config.chat.commandCenter.enabled'),
-		ContextKeyExpr.has(`config.${ChatConfiguration.AgentSessionProjectionEnabled}`).negate() // Hide when agent controls are shown
+		ContextKeyExpr.or(
+			ContextKeyExpr.has(`config.${ChatConfiguration.AgentStatusEnabled}`).negate(), // Show when agent status is disabled
+			ChatContextKeys.agentStatusHasNotifications.negate() // Or when agent status has no notifications
+		)
 	),
-	order: 10001 // to the right of command center
+	order: 10003 // to the right of agent controls
 });
 
 // Add to the global title bar if command center is disabled
@@ -1192,30 +1195,5 @@ registerAction2(class ToggleChatViewTitleAction extends Action2 {
 
 		const chatViewTitleEnabled = configurationService.getValue<boolean>(ChatConfiguration.ChatViewTitleEnabled);
 		await configurationService.updateValue(ChatConfiguration.ChatViewTitleEnabled, !chatViewTitleEnabled);
-	}
-});
-
-registerAction2(class ToggleChatViewWelcomeAction extends Action2 {
-	constructor() {
-		super({
-			id: 'workbench.action.chat.toggleChatViewWelcome',
-			title: localize2('chat.toggleChatViewWelcome.label', "Show Welcome"),
-			category: CHAT_CATEGORY,
-			precondition: ChatContextKeys.enabled,
-			toggled: ContextKeyExpr.equals(`config.${ChatConfiguration.ChatViewWelcomeEnabled}`, true),
-			menu: {
-				id: MenuId.ChatWelcomeContext,
-				group: '1_modify',
-				order: 3,
-				when: ChatContextKeys.inChatEditor.negate()
-			}
-		});
-	}
-
-	async run(accessor: ServicesAccessor): Promise<void> {
-		const configurationService = accessor.get(IConfigurationService);
-
-		const chatViewWelcomeEnabled = configurationService.getValue<boolean>(ChatConfiguration.ChatViewWelcomeEnabled);
-		await configurationService.updateValue(ChatConfiguration.ChatViewWelcomeEnabled, !chatViewWelcomeEnabled);
 	}
 });
