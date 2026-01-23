@@ -83,6 +83,7 @@ export class StartSessionAction extends Action2 {
 				id: MenuId.InlineChatEditorAffordance,
 				group: '1_chat',
 				order: 1,
+				when: EditorContextKeys.hasNonEmptySelection
 			}]
 		});
 	}
@@ -328,7 +329,10 @@ export class UndoAndCloseSessionAction2 extends KeepOrUndoSessionAction {
 				id: MenuId.ChatEditorInlineExecute,
 				group: 'navigation',
 				order: 100,
-				when: CTX_HOVER_MODE.negate()
+				when: ContextKeyExpr.or(
+					CTX_HOVER_MODE.negate(),
+					ContextKeyExpr.and(CTX_HOVER_MODE, ctxHasEditorModification.negate(), ctxHasRequestInProgress.negate())
+				)
 			}]
 		});
 	}
