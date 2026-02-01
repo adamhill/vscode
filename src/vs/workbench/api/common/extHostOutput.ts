@@ -140,7 +140,6 @@ export class ExtHostOutputService implements ExtHostOutputServiceShape {
 		if (isString(languageId) && !languageId.trim()) {
 			throw new Error('illegal argument `languageId`. must not be empty');
 		}
-
 		const channelDisposables = new DisposableStore();
 		let extHostOutputChannelPromise;
 		let logLevel = this.initData.environment.extensionLogLevel?.find(([identifier]) => ExtensionIdentifier.equals(extension.identifier, identifier))?.[1];
@@ -152,12 +151,7 @@ export class ExtHostOutputService implements ExtHostOutputServiceShape {
 			if (existingOutputChannel) {
 				return existingOutputChannel;
 			}
-			// Only override the extension-specific default log level if the user has explicitly configured a level for this logger.
-			// Note: registeredLogger.logLevel is undefined when using defaults, and a LogLevel value when explicitly set by the user.
-			const registeredLogger = this.loggerService.getRegisteredLogger(logFile);
-			if (registeredLogger?.logLevel !== undefined) {
-				logLevel = registeredLogger.logLevel;
-			}
+			logLevel = this.loggerService.getLogLevel(logFile) ?? logLevel;
 			extHostOutputChannelPromise = this.doCreateLogOutputChannel(name, logFile, logLevel, extension, channelDisposables);
 		} else {
 			extHostOutputChannelPromise = this.doCreateOutputChannel(name, languageId, extension, channelDisposables);
