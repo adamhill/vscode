@@ -71,12 +71,16 @@ import { IPromptsService } from '../../common/promptSyntax/service/promptsServic
 import { handleModeSwitch } from '../actions/chatActions.js';
 import { ChatTreeItem, IChatAcceptInputOptions, IChatAccessibilityService, IChatCodeBlockInfo, IChatFileTreeInfo, IChatListItemRendererOptions, IChatWidget, IChatWidgetService, IChatWidgetViewContext, IChatWidgetViewModelChangeEvent, IChatWidgetViewOptions, isIChatResourceViewContext, isIChatViewViewContext } from '../chat.js';
 import { ChatAttachmentModel } from '../attachments/chatAttachmentModel.js';
+import { IChatAttachmentResolveService } from '../attachments/chatAttachmentResolveService.js';
 import { ChatSuggestNextWidget } from './chatContentParts/chatSuggestNextWidget.js';
 import { ChatInputPart, IChatInputPartOptions, IChatInputStyles } from './input/chatInputPart.js';
 import { IChatListItemTemplate } from './chatListRenderer.js';
 import { ChatListWidget } from './chatListWidget.js';
 import { ChatEditorOptions } from './chatOptions.js';
 import { ChatViewWelcomePart, IChatSuggestedPrompts, IChatViewWelcomeContent } from '../viewsWelcome/chatViewWelcomeController.js';
+import { IChatTipService } from '../chatTipService.js';
+import { ChatTipContentPart } from './chatContentParts/chatTipContentPart.js';
+import { ChatContentMarkdownRenderer } from './chatContentMarkdownRenderer.js';
 import { IAgentSessionsService } from '../agentSessions/agentSessionsService.js';
 
 const $ = dom.$;
@@ -160,6 +164,7 @@ const supportsAllAttachments: Required<IChatAgentAttachmentCapabilities> = {
 	supportsProblemAttachments: true,
 	supportsSymbolAttachments: true,
 	supportsTerminalAttachments: true,
+	supportsPromptAttachments: true,
 };
 
 const DISCLAIMER = localize('chatDisclaimer', "AI responses may be inaccurate.");
@@ -231,6 +236,8 @@ export class ChatWidget extends Disposable implements IChatWidget {
 
 	private welcomeMessageContainer!: HTMLElement;
 	private readonly welcomePart: MutableDisposable<ChatViewWelcomePart> = this._register(new MutableDisposable());
+
+	private readonly _gettingStartedTipPart = this._register(new MutableDisposable<DisposableStore>());
 
 	private readonly chatSuggestNextWidget: ChatSuggestNextWidget;
 
@@ -309,6 +316,7 @@ export class ChatWidget extends Disposable implements IChatWidget {
 				.parseChatRequest(this.viewModel.sessionResource, this.getInput(), this.location, {
 					selectedAgent: this._lastSelectedAgent,
 					mode: this.input.currentModeKind,
+					attachmentCapabilities: this.attachmentCapabilities,
 					forcedAgent: this._lockedAgent?.id ? this.chatAgentService.getAgent(this._lockedAgent.id) : undefined
 				});
 			this._onDidChangeParsedInput.fire();
@@ -365,7 +373,9 @@ export class ChatWidget extends Disposable implements IChatWidget {
 		@IAgentSessionsService private readonly agentSessionsService: IAgentSessionsService,
 		@IChatTodoListService private readonly chatTodoListService: IChatTodoListService,
 		@IWorkspaceContextService private readonly contextService: IWorkspaceContextService,
-		@ILifecycleService private readonly lifecycleService: ILifecycleService
+		@ILifecycleService private readonly lifecycleService: ILifecycleService,
+		@IChatAttachmentResolveService private readonly chatAttachmentResolveService: IChatAttachmentResolveService,
+		@IChatTipService private readonly chatTipService: IChatTipService,
 	) {
 		super();
 
@@ -740,6 +750,15 @@ export class ChatWidget extends Disposable implements IChatWidget {
 		return this.input.focusQuestionCarousel();
 	}
 
+	toggleTipFocus(): boolean {
+		if (this.listWidget.hasTipFocus()) {
+			this.focusInput();
+			return true;
+		}
+
+		return this.listWidget.focusTip();
+	}
+
 	hasInputFocus(): boolean {
 		return this.input.hasFocus();
 	}
@@ -829,9 +848,25 @@ export class ChatWidget extends Disposable implements IChatWidget {
 	 */
 	private updateChatViewVisibility(): void {
 		if (this.viewModel) {
+			const isStandardLayout = this.viewOptions.renderStyle !== 'compact' && this.viewOptions.renderStyle !== 'minimal';
 			const numItems = this.viewModel.getItems().length;
 			dom.setVisibility(numItems === 0, this.welcomeMessageContainer);
 			dom.setVisibility(numItems !== 0, this.listContainer);
+
+			// Show/hide the getting-started tip container based on empty state.
+			// Only use this in the standard chat layout where the welcome view is shown.
+			if (isStandardLayout && this.inputPart) {
+				const tipContainer = this.inputPart.gettingStartedTipContainerElement;
+				if (numItems === 0) {
+					this.renderGettingStartedTipIfNeeded();
+				} else {
+					// Dispose the cached tip part so the next empty state picks a
+					// fresh (rotated) tip instead of re-showing the stale one.
+					this._gettingStartedTipPart.clear();
+					dom.clearNode(tipContainer);
+					dom.setVisibility(false, tipContainer);
+				}
+			}
 		}
 
 		// Only show welcome getting started until extension is installed
@@ -891,6 +926,44 @@ export class ChatWidget extends Disposable implements IChatWidget {
 		} finally {
 			this._isRenderingWelcome = false;
 		}
+	}
+
+	private renderGettingStartedTipIfNeeded(): void {
+		if (!this.inputPart) {
+			return;
+		}
+
+		const tipContainer = this.inputPart.gettingStartedTipContainerElement;
+
+		// Already showing a tip
+		if (this._gettingStartedTipPart.value) {
+			dom.setVisibility(true, tipContainer);
+			return;
+		}
+
+		const tip = this.chatTipService.getWelcomeTip(this.contextKeyService);
+		if (!tip) {
+			dom.setVisibility(false, tipContainer);
+			return;
+		}
+
+		const store = new DisposableStore();
+		const renderer = this.instantiationService.createInstance(ChatContentMarkdownRenderer);
+		const tipPart = store.add(this.instantiationService.createInstance(ChatTipContentPart,
+			tip,
+			renderer,
+			() => this.chatTipService.getWelcomeTip(this.contextKeyService),
+		));
+		tipContainer.appendChild(tipPart.domNode);
+
+		store.add(tipPart.onDidHide(() => {
+			tipPart.domNode.remove();
+			this._gettingStartedTipPart.clear();
+			dom.setVisibility(false, tipContainer);
+		}));
+
+		this._gettingStartedTipPart.value = store;
+		dom.setVisibility(true, tipContainer);
 	}
 
 	private _getGenerateInstructionsMessage(): IMarkdownString {
@@ -979,7 +1052,7 @@ export class ChatWidget extends Disposable implements IChatWidget {
 			message: new MarkdownString(DISCLAIMER),
 			icon: Codicon.chatSparkle,
 			additionalMessage,
-			suggestedPrompts: this.getPromptFileSuggestions()
+			suggestedPrompts: this.getPromptFileSuggestions(),
 		};
 	}
 
@@ -1855,6 +1928,7 @@ export class ChatWidget extends Disposable implements IChatWidget {
 		}
 		this.inputPart.clearTodoListWidget(model.sessionResource, false);
 		this.chatSuggestNextWidget.hide();
+		this.chatTipService.resetSession();
 
 		this._codeBlockModelCollection.clear();
 
@@ -2210,6 +2284,9 @@ export class ChatWidget extends Disposable implements IChatWidget {
 				}
 			}
 		}
+		// Expand directory attachments: extract images as binary entries
+		const resolvedImageVariables = await this._resolveDirectoryImageAttachments(requestInputs.attachedContext.asArray());
+
 		if (this.viewModel.sessionResource && !options.queue) {
 			// todo@connor4312: move chatAccessibilityService.acceptRequest to a refcount model to handle queue messages
 			this.chatAccessibilityService.acceptRequest(this._viewModel!.sessionResource);
@@ -2221,6 +2298,7 @@ export class ChatWidget extends Disposable implements IChatWidget {
 			locationData: this._location.resolveData?.(),
 			parserContext: { selectedAgent: this._lastSelectedAgent, mode: this.input.currentModeKind },
 			attachedContext: requestInputs.attachedContext.asArray(),
+			resolvedVariables: resolvedImageVariables,
 			noCommandDetection: options?.noCommandDetection,
 			...this.getModeRequestOptions(),
 			modeInfo: this.input.currentModeInfo,
@@ -2266,6 +2344,26 @@ export class ChatWidget extends Disposable implements IChatWidget {
 		});
 
 		return sent.data.responseCreatedPromise;
+	}
+
+	// Resolve images from directory attachments to send as additional variables.
+	private async _resolveDirectoryImageAttachments(attachments: IChatRequestVariableEntry[]): Promise<IChatRequestVariableEntry[]> {
+		const imagePromises: Promise<IChatRequestVariableEntry[]>[] = [];
+
+		for (const attachment of attachments) {
+			if (attachment.kind === 'directory' && URI.isUri(attachment.value)) {
+				imagePromises.push(
+					this.chatAttachmentResolveService.resolveDirectoryImages(attachment.value)
+				);
+			}
+		}
+
+		if (imagePromises.length === 0) {
+			return [];
+		}
+
+		const resolved = await Promise.all(imagePromises);
+		return resolved.flat();
 	}
 
 	private async confirmPendingRequestsBeforeSend(model: IChatModel, options: IChatAcceptInputOptions): Promise<boolean> {

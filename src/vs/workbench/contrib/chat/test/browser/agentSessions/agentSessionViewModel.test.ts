@@ -22,7 +22,7 @@ import { MenuId } from '../../../../../../platform/actions/common/actions.js';
 import { ILifecycleService } from '../../../../../services/lifecycle/common/lifecycle.js';
 import { TestInstantiationService } from '../../../../../../platform/instantiation/test/common/instantiationServiceMock.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../../../platform/storage/common/storage.js';
-import { AgentSessionProviders, getAgentSessionProviderIcon, getAgentSessionProviderName } from '../../../browser/agentSessions/agentSessions.js';
+import { AgentSessionProviders, getAgentCanContinueIn, getAgentSessionProviderIcon, getAgentSessionProviderName } from '../../../browser/agentSessions/agentSessions.js';
 
 
 suite('AgentSessions', () => {
@@ -532,6 +532,9 @@ suite('AgentSessions', () => {
 				};
 
 				mockChatSessionsService.registerChatSessionItemController('test-type', controller);
+				// Registering calls a refresh initially
+				assert.strictEqual(controllerCallCount, 1);
+
 				viewModel = createViewModel();
 
 				// Make multiple rapid resolve calls
@@ -543,8 +546,8 @@ suite('AgentSessions', () => {
 
 				await Promise.all(resolvePromises);
 
-				// Should only call controller once due to throttling
-				assert.strictEqual(controllerCallCount, 1);
+				// Should only call controller once more due to throttling
+				assert.strictEqual(controllerCallCount, 2);
 				assert.strictEqual(viewModel.sessions.length, 1);
 			});
 		});
@@ -590,8 +593,8 @@ suite('AgentSessions', () => {
 				// First resolve all
 				await viewModel.resolve(undefined);
 				assert.strictEqual(viewModel.sessions.length, 2);
-				assert.strictEqual(controller1CallCount, 1);
-				assert.strictEqual(controller2CallCount, 1);
+				assert.strictEqual(controller1CallCount, 2); // One from registration and one from resolve
+				assert.strictEqual(controller2CallCount, 2); // One from registration and one from resolve
 
 				// Now resolve only type-2
 				await viewModel.resolve('type-2');
@@ -599,9 +602,9 @@ suite('AgentSessions', () => {
 				// Should still have only one session
 				assert.strictEqual(viewModel.sessions.length, 1);
 				// Controller 1 should not be called again
-				assert.strictEqual(controller1CallCount, 1);
+				assert.strictEqual(controller1CallCount, 2);
 				// Controller 2 should be called again
-				assert.strictEqual(controller2CallCount, 2);
+				assert.strictEqual(controller2CallCount, 3);
 			});
 		});
 
@@ -1946,6 +1949,16 @@ suite('AgentSessions', () => {
 			assert.strictEqual(icon.id, Codicon.cloud.id);
 		});
 
+		test('should return correct name for Growth provider', () => {
+			const name = getAgentSessionProviderName(AgentSessionProviders.Growth);
+			assert.strictEqual(name, 'Growth');
+		});
+
+		test('should return correct icon for Growth provider', () => {
+			const icon = getAgentSessionProviderIcon(AgentSessionProviders.Growth);
+			assert.strictEqual(icon.id, Codicon.lightbulb.id);
+		});
+
 		test('should handle Local provider type in model', async () => {
 			return runWithFakedTimers({}, async () => {
 				const instantiationService = disposables.add(workbenchInstantiationService(undefined, disposables));
@@ -2081,6 +2094,25 @@ suite('AgentSessions', () => {
 				const session = viewModel.sessions[0];
 				assert.strictEqual(session.icon.id, Codicon.terminal.id);
 			});
+		});
+	});
+
+	suite('AgentSessionsViewModel - getAgentCanContinueIn', () => {
+		ensureNoDisposablesAreLeakedInTestSuite();
+
+		test('should return false when contribution.isReadOnly is true', () => {
+			const result = getAgentCanContinueIn(AgentSessionProviders.Cloud, { type: 'test', name: 'test', displayName: 'Test', description: 'test', isReadOnly: true });
+			assert.strictEqual(result, false);
+		});
+
+		test('should return true for Cloud when contribution is not read-only', () => {
+			const result = getAgentCanContinueIn(AgentSessionProviders.Cloud, { type: 'test', name: 'test', displayName: 'Test', description: 'test', isReadOnly: false });
+			assert.strictEqual(result, true);
+		});
+
+		test('should return false for Growth provider', () => {
+			const result = getAgentCanContinueIn(AgentSessionProviders.Growth);
+			assert.strictEqual(result, false);
 		});
 	});
 
