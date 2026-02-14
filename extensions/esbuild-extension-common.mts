@@ -59,7 +59,7 @@ function resolveOptions(config: RunConfig, outdir: string): BuildOptions {
 		options.format = 'cjs';
 		options.mainFields = ['module', 'main'];
 	} else if (config.platform === 'browser') {
-		options.format = 'iife';
+		options.format = 'cjs';
 		options.mainFields = ['browser', 'module', 'main'];
 		options.alias = {
 			'path': 'path-browserify',

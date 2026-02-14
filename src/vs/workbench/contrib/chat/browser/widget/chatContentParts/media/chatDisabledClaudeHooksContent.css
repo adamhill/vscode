@@ -3,7 +3,12 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-/* Utility class applied during panel animations to prevent content overflow */
-.monaco-split-view2 > .split-view-container > .split-view-view.motion-animating {
-	overflow: hidden;
+.chat-disabled-claude-hooks-message {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	font-style: italic;
+	font-size: 12px;
+	color: var(--vscode-descriptionForeground);
+	opacity: 0.8;
 }

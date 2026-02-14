@@ -32,11 +32,11 @@ import { AGENT_MD_FILENAME, CLAUDE_CONFIG_FOLDER, CLAUDE_LOCAL_MD_FILENAME, CLAU
 import { PROMPT_LANGUAGE_ID, PromptsType, getPromptsTypeForLanguageId } from '../promptTypes.js';
 import { PromptFilesLocator } from '../utils/promptFilesLocator.js';
 import { PromptFileParser, ParsedPromptFile, PromptHeaderAttributes } from '../promptFileParser.js';
-import { IAgentInstructions, type IAgentSource, IChatPromptSlashCommand, ICustomAgent, IExtensionPromptPath, ILocalPromptPath, IPromptPath, IPromptsService, IAgentSkill, IUserPromptPath, PromptsStorage, ExtensionAgentSourceType, CUSTOM_AGENT_PROVIDER_ACTIVATION_EVENT, INSTRUCTIONS_PROVIDER_ACTIVATION_EVENT, IPromptFileContext, IPromptFileResource, PROMPT_FILE_PROVIDER_ACTIVATION_EVENT, SKILL_PROVIDER_ACTIVATION_EVENT, IPromptDiscoveryInfo, IPromptFileDiscoveryResult, ICustomAgentVisibility, IResolvedAgentFile, AgentFileType, Logger, Target } from './promptsService.js';
+import { IAgentInstructions, type IAgentSource, IChatPromptSlashCommand, IConfiguredHooksInfo, ICustomAgent, IExtensionPromptPath, ILocalPromptPath, IPromptPath, IPromptsService, IAgentSkill, IUserPromptPath, PromptsStorage, ExtensionAgentSourceType, CUSTOM_AGENT_PROVIDER_ACTIVATION_EVENT, INSTRUCTIONS_PROVIDER_ACTIVATION_EVENT, IPromptFileContext, IPromptFileResource, PROMPT_FILE_PROVIDER_ACTIVATION_EVENT, SKILL_PROVIDER_ACTIVATION_EVENT, IPromptDiscoveryInfo, IPromptFileDiscoveryResult, ICustomAgentVisibility, IResolvedAgentFile, AgentFileType, Logger, Target } from './promptsService.js';
 import { Delayer } from '../../../../../../base/common/async.js';
 import { Schemas } from '../../../../../../base/common/network.js';
 import { IChatRequestHooks, IHookCommand, HookType } from '../hookSchema.js';
-import { parseHooksFromFile } from '../hookCompatibility.js';
+import { HookSourceFormat, getHookSourceFormat, parseHooksFromFile } from '../hookCompatibility.js';
 import { IWorkspaceContextService } from '../../../../../../platform/workspace/common/workspace.js';
 import { IPathService } from '../../../../../services/path/common/pathService.js';
 import { getTarget, mapClaudeModels, mapClaudeTools } from '../languageProviders/promptValidator.js';
@@ -96,7 +96,7 @@ export class PromptsService extends Disposable implements IPromptsService {
 	/**
 	 * Cached hooks. Invalidated when hook files change.
 	 */
-	private readonly cachedHooks: CachedPromise<IChatRequestHooks | undefined>;
+	private readonly cachedHooks: CachedPromise<IConfiguredHooksInfo | undefined>;
 
 	/**
 	 * Cached skills. Caching only happens if the `onDidChangeSkills` event is used.
@@ -179,7 +179,7 @@ export class PromptsService extends Disposable implements IPromptsService {
 			(token) => this.computeHooks(token),
 			() => Event.any(
 				this.getFileLocatorEvent(PromptsType.hook),
-				Event.filter(this.configurationService.onDidChangeConfiguration, e => e.affectsConfiguration(PromptsConfig.USE_CHAT_HOOKS)),
+				Event.filter(this.configurationService.onDidChangeConfiguration, e => e.affectsConfiguration(PromptsConfig.USE_CHAT_HOOKS) || e.affectsConfiguration(PromptsConfig.USE_CLAUDE_HOOKS)),
 			)
 		));
 
@@ -1002,16 +1002,17 @@ export class PromptsService extends Disposable implements IPromptsService {
 		return result;
 	}
 
-	public getHooks(token: CancellationToken): Promise<IChatRequestHooks | undefined> {
+	public async getHooks(token: CancellationToken): Promise<IConfiguredHooksInfo | undefined> {
 		return this.cachedHooks.get(token);
 	}
 
-	private async computeHooks(token: CancellationToken): Promise<IChatRequestHooks | undefined> {
+	private async computeHooks(token: CancellationToken): Promise<IConfiguredHooksInfo | undefined> {
 		const useChatHooks = this.configurationService.getValue(PromptsConfig.USE_CHAT_HOOKS);
 		if (!useChatHooks) {
 			return undefined;
 		}
 
+		const useClaudeHooks = this.configurationService.getValue<boolean>(PromptsConfig.USE_CLAUDE_HOOKS);
 		const hookFiles = await this.listPromptFiles(PromptsType.hook, token);
 
 		if (hookFiles.length === 0) {
@@ -1029,6 +1030,7 @@ export class PromptsService extends Disposable implements IPromptsService {
 		const workspaceFolder = this.workspaceService.getWorkspace().folders[0];
 		const workspaceRootUri = workspaceFolder?.uri;
 
+		let hasDisabledClaudeHooks = false;
 		const collectedHooks: Record<HookType, IHookCommand[]> = {
 			[HookType.SessionStart]: [],
 			[HookType.UserPromptSubmit]: [],
@@ -1051,6 +1053,16 @@ export class PromptsService extends Disposable implements IPromptsService {
 				// Skip files that have all hooks disabled
 				if (disabledAllHooks) {
 					this.logger.trace(`[PromptsService] Skipping hook file with disableAllHooks: ${hookFile.uri}`);
+					continue;
+				}
+
+				if (format === HookSourceFormat.Claude && useClaudeHooks === false) {
+					const hasAnyCommands = [...hooks.values()].some(({ hooks: cmds }) => cmds.length > 0);
+					if (hasAnyCommands) {
+						hasDisabledClaudeHooks = true;
+					}
+
+					this.logger.trace(`[PromptsService] Skipping Claude hook file (disabled via setting): ${hookFile.uri}`);
 					continue;
 				}
 
@@ -1078,7 +1090,7 @@ export class PromptsService extends Disposable implements IPromptsService {
 		) as IChatRequestHooks;
 
 		this.logger.trace(`[PromptsService] Collected hooks: ${JSON.stringify(Object.keys(result))}`);
-		return result;
+		return { hooks: result, hasDisabledClaudeHooks };
 	}
 
 	public async getPromptDiscoveryInfo(type: PromptsType, token: CancellationToken): Promise<IPromptDiscoveryInfo> {
@@ -1331,12 +1343,26 @@ export class PromptsService extends Disposable implements IPromptsService {
 		const workspaceFolder = this.workspaceService.getWorkspace().folders[0];
 		const workspaceRootUri = workspaceFolder?.uri;
 
+		const useClaudeHooks = this.configurationService.getValue<boolean>(PromptsConfig.USE_CLAUDE_HOOKS);
 		const hookFiles = await this.listPromptFiles(PromptsType.hook, token);
 		for (const promptPath of hookFiles) {
 			const uri = promptPath.uri;
 			const storage = promptPath.storage;
 			const extensionId = promptPath.extension?.identifier?.value;
 			const name = basename(uri);
+
+			// Skip Claude hooks when the setting is disabled
+			if (getHookSourceFormat(uri) === HookSourceFormat.Claude && useClaudeHooks === false) {
+				files.push({
+					uri,
+					storage,
+					status: 'skipped',
+					skipReason: 'claude-hooks-disabled',
+					name,
+					extensionId
+				});
+				continue;
+			}
 
 			try {
 				// Try to parse the JSON to validate it (supports JSONC with comments)
