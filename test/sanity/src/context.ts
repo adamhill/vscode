@@ -10,7 +10,7 @@ import { test } from 'mocha';
 import fetch, { Response } from 'node-fetch';
 import os from 'os';
 import path from 'path';
-import { Browser, chromium, Page, webkit } from 'playwright';
+import { Browser, chromium, ElectronApplication, Page, webkit } from 'playwright';
 import { Capability, detectCapabilities } from './detectors.js';
 
 /**
@@ -32,8 +32,12 @@ interface ITargetMetadata {
  */
 export class TestContext {
 	private static readonly authenticodeInclude = /^.+\.(exe|dll|sys|cab|cat|msi|jar|ocx|ps1|psm1|psd1|ps1xml|pssc1)$/i;
+	// MXC SDK ships per-arch SPDX catalog manifests that Get-AuthenticodeSignature reports as UnknownError.
+	private static readonly authenticodeExclude = /[\\/]node_modules[\\/]@microsoft[\\/]mxc-sdk[\\/]bin[\\/][^\\/]+[\\/]_manifest[\\/][^\\/]+[\\/]manifest\.cat$/i;
 	private static readonly versionInfoInclude = /^.+\.(exe|dll|node|msi)$/i;
-	private static readonly versionInfoExclude = /^(dxil\.dll|ffmpeg\.dll|msalruntime\.dll)$/i;
+	private static readonly versionInfoFileExclude = /^(dxil\.dll|ffmpeg\.dll|msalruntime\.dll)$/i;
+	// MXC SDK binaries under bin are signed, but they do not carry a ProductName VersionInfo resource.
+	private static readonly versionInfoPathExclude = /(?:^|[\\/])node_modules(?:\.asar\.unpacked)?[\\/]@microsoft[\\/]mxc-sdk[\\/]bin[\\/]/i;
 	private static readonly dpkgLockError = /dpkg frontend lock was locked by another process|unable to acquire the dpkg frontend lock|could not get lock \/var\/lib\/dpkg\/lock-frontend/i;
 
 	private readonly tempDirs = new Set<string>();
@@ -370,7 +374,11 @@ export class TestContext {
 			if (entry.isDirectory()) {
 				this.collectAuthenticodeFiles(filePath, files);
 			} else if (TestContext.authenticodeInclude.test(entry.name)) {
-				files.push(filePath);
+				if (TestContext.authenticodeExclude.test(filePath)) {
+					this.log(`Skipping excluded file from Authenticode validation: ${filePath}`);
+				} else {
+					files.push(filePath);
+				}
 			}
 		}
 	}
@@ -430,7 +438,7 @@ export class TestContext {
 			if (entry.isDirectory()) {
 				this.collectVersionInfoFiles(filePath, files);
 			} else if (TestContext.versionInfoInclude.test(entry.name)) {
-				if (TestContext.versionInfoExclude.test(entry.name)) {
+				if (TestContext.versionInfoFileExclude.test(entry.name) || TestContext.versionInfoPathExclude.test(filePath)) {
 					this.log(`Skipping excluded file from VersionInfo validation: ${filePath}`);
 				} else {
 					files.push(filePath);
@@ -1121,6 +1129,40 @@ export class TestContext {
 		const page = await pagePromise;
 		page.setDefaultTimeout(3 * 60 * 1000);
 		return page;
+	}
+
+	/**
+	 * Closes a Playwright Electron application gracefully, falling back to a forced
+	 * kill of the process tree if the close hangs (for example after a renderer crash).
+	 */
+	public async closeElectronApp(app: ElectronApplication, timeoutMs = 60_000): Promise<void> {
+		this.log('Closing the application');
+		const pid = app.process().pid;
+		let timeoutHandle: NodeJS.Timeout | undefined;
+		try {
+			await Promise.race([
+				app.close(),
+				new Promise<never>((_, reject) => {
+					timeoutHandle = setTimeout(
+						() => reject(new Error(`app.close() did not complete within ${timeoutMs}ms`)),
+						timeoutMs,
+					);
+				}),
+			]);
+		} catch (error) {
+			this.warn(`Failed to close application gracefully: ${error instanceof Error ? error.message : String(error)}`);
+			if (pid) {
+				try {
+					this.killProcessTree(pid);
+				} catch (killError) {
+					this.warn(`Failed to force-kill application process tree: ${killError instanceof Error ? killError.message : String(killError)}`);
+				}
+			}
+		} finally {
+			if (timeoutHandle) {
+				clearTimeout(timeoutHandle);
+			}
+		}
 	}
 
 	/**
