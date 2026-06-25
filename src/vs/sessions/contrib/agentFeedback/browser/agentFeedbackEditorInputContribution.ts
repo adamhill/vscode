@@ -5,31 +5,33 @@
 
 import './media/agentFeedbackEditorInput.css';
 import { Disposable, DisposableStore } from '../../../../base/common/lifecycle.js';
-import { ICodeEditor, IDiffEditor, IOverlayWidget, IOverlayWidgetPosition } from '../../../../editor/browser/editorBrowser.js';
+import { ICodeEditor, IOverlayWidget, IOverlayWidgetPosition } from '../../../../editor/browser/editorBrowser.js';
 import { IEditorContribution } from '../../../../editor/common/editorCommon.js';
 import { EditorContributionInstantiation, registerEditorContribution } from '../../../../editor/browser/editorExtensions.js';
 import { ICodeEditorService } from '../../../../editor/browser/services/codeEditorService.js';
 import { EditorOption } from '../../../../editor/common/config/editorOptions.js';
 import { Selection, SelectionDirection } from '../../../../editor/common/core/selection.js';
-import { URI } from '../../../../base/common/uri.js';
 import { addStandardDisposableListener, getWindow, ModifierKeyEmitter } from '../../../../base/browser/dom.js';
 import { KeyCode } from '../../../../base/common/keyCodes.js';
 import { IAgentFeedbackService } from './agentFeedbackService.js';
-import { IChatEditingService } from '../../../../workbench/contrib/chat/common/editing/chatEditingService.js';
-import { ISessionsManagementService } from '../../../services/sessions/common/sessionsManagement.js';
-import { createAgentFeedbackContext, getSessionForResource } from './agentFeedbackEditorUtils.js';
+import { createAgentFeedbackContext } from './agentFeedbackEditorUtils.js';
 import { localize } from '../../../../nls.js';
 import { ActionBar } from '../../../../base/browser/ui/actionbar/actionbar.js';
 import { Action } from '../../../../base/common/actions.js';
 import { Codicon } from '../../../../base/common/codicons.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { Emitter, Event } from '../../../../base/common/event.js';
+import { ISession } from '../../../services/sessions/common/session.js';
 
 class AgentFeedbackInputWidget extends Disposable implements IOverlayWidget {
 
 	private static readonly _ID = 'agentFeedback.inputWidget';
 	private static readonly _MIN_WIDTH = 150;
 	private static readonly _MAX_WIDTH = 400;
+	// The input should never be wider than the editor itself. Cap it to this
+	// fraction of the editor width so it doesn't render past the editor bounds
+	// on narrow editors.
+	private static readonly _MAX_WIDTH_EDITOR_FRACTION = 0.9;
 
 	readonly allowEditorOverflow = false;
 
@@ -163,6 +165,14 @@ class AgentFeedbackInputWidget extends Disposable implements IOverlayWidget {
 		this._autoSize();
 	}
 
+	setPlaceholder(placeholder: string): void {
+		if (this._inputElement.placeholder === placeholder) {
+			return;
+		}
+		this._inputElement.placeholder = placeholder;
+		this._autoSize();
+	}
+
 	autoSize(): void {
 		this._autoSize();
 	}
@@ -184,14 +194,31 @@ class AgentFeedbackInputWidget extends Disposable implements IOverlayWidget {
 		this._measureElement.textContent = text;
 		const textWidth = this._measureElement.scrollWidth;
 
-		// Clamp width between min and max
-		const width = Math.max(AgentFeedbackInputWidget._MIN_WIDTH, Math.min(textWidth + 10, AgentFeedbackInputWidget._MAX_WIDTH));
+		// Clamp width between min and a max that never exceeds the editor width.
+		// On very narrow editors the max can drop below the nominal minimum, so
+		// derive an effective minimum that never exceeds the max and apply it
+		// inline to override the CSS `min-width` (otherwise the textarea would be
+		// forced back up to its CSS minimum and overflow the editor).
+		const maxWidth = this._computeMaxWidth();
+		const minWidth = Math.min(AgentFeedbackInputWidget._MIN_WIDTH, maxWidth);
+		const desiredWidth = Math.max(minWidth, textWidth + 10);
+		const width = Math.min(desiredWidth, maxWidth);
+		this._inputElement.style.minWidth = `${minWidth}px`;
 		this._inputElement.style.width = `${width}px`;
 
 		// Reset height to auto then expand to fit all content, with a minimum of 1 line
 		this._inputElement.style.height = 'auto';
 		const newHeight = Math.max(this._inputElement.scrollHeight, this._lineHeight);
 		this._inputElement.style.height = `${newHeight}px`;
+	}
+
+	private _computeMaxWidth(): number {
+		// The widget sticks to the editor's content left edge, so the space it
+		// has available is the content area width (to the right of the line
+		// numbers/glyph margin), not the full editor width.
+		const layoutInfo = this._editor.getLayoutInfo();
+		const contentWidth = Math.max(0, layoutInfo.width - layoutInfo.contentLeft);
+		return Math.min(AgentFeedbackInputWidget._MAX_WIDTH, contentWidth * AgentFeedbackInputWidget._MAX_WIDTH_EDITOR_FRACTION);
 	}
 
 }
@@ -204,15 +231,13 @@ export class AgentFeedbackEditorInputContribution extends Disposable implements 
 	private _visible = false;
 	private _mouseDown = false;
 	private _suppressSelectionChangeOnce = false;
-	private _sessionResource: URI | undefined;
+	private _session: ISession | undefined;
 	private _pinnedSelection: Selection | undefined;
 	private readonly _widgetListeners = this._store.add(new DisposableStore());
 
 	constructor(
 		private readonly _editor: ICodeEditor,
 		@IAgentFeedbackService private readonly _agentFeedbackService: IAgentFeedbackService,
-		@IChatEditingService private readonly _chatEditingService: IChatEditingService,
-		@ISessionsManagementService private readonly _sessionsManagementService: ISessionsManagementService,
 		@ICodeEditorService private readonly _codeEditorService: ICodeEditorService,
 	) {
 		super();
@@ -221,6 +246,14 @@ export class AgentFeedbackEditorInputContribution extends Disposable implements 
 		this._store.add(this._editor.onDidChangeModel(() => this._onModelChanged()));
 		this._store.add(this._editor.onDidScrollChange(() => {
 			if (this._visible) {
+				this._updatePosition();
+			}
+		}));
+		this._store.add(this._editor.onDidLayoutChange(() => {
+			if (this._visible && this._widget) {
+				// The editor resized: re-clamp the input width to the new editor
+				// width and reposition it.
+				this._widget.autoSize();
 				this._updatePosition();
 			}
 		}));
@@ -273,7 +306,7 @@ export class AgentFeedbackEditorInputContribution extends Disposable implements 
 	private _onModelChanged(): void {
 		this._hide();
 		this._suppressSelectionChangeOnce = false;
-		this._sessionResource = undefined;
+		this._session = undefined;
 	}
 
 	private _onSelectionChanged(): void {
@@ -294,7 +327,7 @@ export class AgentFeedbackEditorInputContribution extends Disposable implements 
 		}
 
 		const selection = this._editor.getSelection();
-		if (!selection || (selection.isEmpty() && !this._getDiffHunkForSelection(selection))) {
+		if (!selection || selection.isEmpty()) {
 			this._autoHide();
 			return;
 		}
@@ -305,13 +338,13 @@ export class AgentFeedbackEditorInputContribution extends Disposable implements 
 			return;
 		}
 
-		const sessionResource = getSessionForResource(model.uri, this._chatEditingService, this._sessionsManagementService);
-		if (!sessionResource) {
+		const session = this._agentFeedbackService.getSessionForFile(model.uri);
+		if (!session) {
 			this._autoHide();
 			return;
 		}
 
-		this._sessionResource = sessionResource;
+		this._session = session;
 		this._show();
 	}
 
@@ -323,10 +356,18 @@ export class AgentFeedbackEditorInputContribution extends Disposable implements 
 			this._registerWidgetListeners(widget);
 		}
 
+		widget.setPlaceholder(this._getPlaceholder());
 		widget.clearInput();
 		widget.show();
 		this._pinnedSelection = this._editor.getSelection() ?? undefined;
 		this._updatePosition();
+	}
+
+	private _getPlaceholder(): string {
+		const hasChanges = !!this._session && this._session.changes.get().length > 0;
+		return hasChanges
+			? localize('agentFeedback.addFeedback', "Add Feedback")
+			: localize('agentFeedback.addComment', "Add Comment");
 	}
 
 	private _hide(): void {
@@ -502,11 +543,11 @@ export class AgentFeedbackEditorInputContribution extends Disposable implements 
 
 		const selection = this._pinnedSelection ?? this._editor.getSelection();
 		const model = this._editor.getModel();
-		if (!selection || !model || !this._sessionResource) {
+		if (!selection || !model || !this._session) {
 			return false;
 		}
 
-		this._agentFeedbackService.addFeedback(this._sessionResource, model.uri, selection, text, undefined, createAgentFeedbackContext(this._editor, this._codeEditorService, model.uri, selection));
+		this._agentFeedbackService.addFeedback(this._session.resource, model.uri, selection, text, undefined, createAgentFeedbackContext(this._editor, this._codeEditorService, model.uri, selection));
 		this._hideAndRefocusEditor();
 		return true;
 	}
@@ -523,58 +564,13 @@ export class AgentFeedbackEditorInputContribution extends Disposable implements 
 
 		const selection = this._pinnedSelection ?? this._editor.getSelection();
 		const model = this._editor.getModel();
-		if (!selection || !model || !this._sessionResource) {
+		if (!selection || !model || !this._session) {
 			return;
 		}
 
-		const sessionResource = this._sessionResource;
+		const sessionResource = this._session.resource;
 		this._hideAndRefocusEditor();
 		this._agentFeedbackService.addFeedbackAndSubmit(sessionResource, model.uri, selection, text, undefined, createAgentFeedbackContext(this._editor, this._codeEditorService, model.uri, selection));
-	}
-
-	private _getContainingDiffEditor(): IDiffEditor | undefined {
-		return this._codeEditorService.listDiffEditors().find(diffEditor =>
-			diffEditor.getModifiedEditor() === this._editor || diffEditor.getOriginalEditor() === this._editor
-		);
-	}
-
-	private _getDiffHunkForSelection(selection: Selection): { startLineNumber: number; endLineNumberExclusive: number } | undefined {
-		if (!selection.isEmpty()) {
-			return undefined;
-		}
-
-		const diffEditor = this._getContainingDiffEditor();
-		if (!diffEditor) {
-			return undefined;
-		}
-
-		const diffResult = diffEditor.getDiffComputationResult();
-		if (!diffResult) {
-			return undefined;
-		}
-
-		const position = selection.getStartPosition();
-		const lineNumber = position.lineNumber;
-		const isModifiedEditor = diffEditor.getModifiedEditor() === this._editor;
-		for (const change of diffResult.changes2) {
-			const lineRange = isModifiedEditor ? change.modified : change.original;
-			if (!lineRange.isEmpty && lineRange.contains(lineNumber)) {
-				// Don't show when cursor is at the start or end position of the hunk
-				const isAtHunkStart = lineNumber === lineRange.startLineNumber && position.column === 1;
-				const lastHunkLine = lineRange.endLineNumberExclusive - 1;
-				const model = this._editor.getModel();
-				const isAtHunkEnd = model && lineNumber === lastHunkLine && position.column === model.getLineMaxColumn(lastHunkLine);
-				if (isAtHunkStart || isAtHunkEnd) {
-					return undefined;
-				}
-				return {
-					startLineNumber: lineRange.startLineNumber,
-					endLineNumberExclusive: lineRange.endLineNumberExclusive,
-				};
-			}
-		}
-
-		return undefined;
 	}
 
 	private _updatePosition(): void {
@@ -600,35 +596,7 @@ export class AgentFeedbackEditorInputContribution extends Disposable implements 
 		const widgetWidth = widgetDom.offsetWidth || 150;
 
 		if (selection.isEmpty()) {
-			const diffHunk = this._getDiffHunkForSelection(selection);
-			if (!diffHunk) {
-				this._autoHide();
-				return;
-			}
-
-			const cursorPosition = selection.getStartPosition();
-			const scrolledPosition = this._editor.getScrolledVisiblePosition(cursorPosition);
-			if (!scrolledPosition) {
-				this._widget.setPosition(null);
-				return;
-			}
-
-			const hunkLineCount = diffHunk.endLineNumberExclusive - diffHunk.startLineNumber;
-			const cursorLineOffset = cursorPosition.lineNumber - diffHunk.startLineNumber;
-			const topHalfLineCount = Math.ceil(hunkLineCount / 2);
-			const top = hunkLineCount < 10
-				? cursorLineOffset < topHalfLineCount
-					? scrolledPosition.top - (cursorLineOffset * lineHeight) - widgetHeight
-					: scrolledPosition.top + ((diffHunk.endLineNumberExclusive - cursorPosition.lineNumber) * lineHeight)
-				: scrolledPosition.top - widgetHeight;
-			const left = Math.max(0, Math.min(scrolledPosition.left, layoutInfo.width - widgetWidth));
-
-			this._widget.setPosition({
-				preference: {
-					top: Math.max(0, Math.min(top, layoutInfo.height - widgetHeight)),
-					left,
-				}
-			});
+			this._autoHide();
 			return;
 		}
 
@@ -663,8 +631,16 @@ export class AgentFeedbackEditorInputContribution extends Disposable implements 
 		// Clamp vertical position within editor bounds
 		top = Math.max(0, Math.min(top, layoutInfo.height - widgetHeight));
 
-		// Clamp horizontal position so the widget stays within the editor
-		const left = Math.max(0, Math.min(scrolledPosition.left, layoutInfo.width - widgetWidth));
+		// Clamp horizontal position so the widget stays within the editor and
+		// never renders on top of the line numbers/glyph margin (content left).
+		// When the editor is scrolled horizontally the cursor position can fall
+		// behind the content area, so stick the widget to the content left edge.
+		// Guard that the left edge (content left) never exceeds the right-most
+		// valid position, otherwise the widget would overflow the editor's right
+		// edge on very narrow editors or with a wide widget.
+		const minLeft = layoutInfo.contentLeft;
+		const maxLeft = Math.max(minLeft, layoutInfo.width - widgetWidth);
+		const left = Math.max(minLeft, Math.min(scrolledPosition.left, maxLeft));
 
 		this._widget.setPosition({ preference: { top, left } });
 	}

@@ -14,7 +14,7 @@ The sessions list (`SessionsView` + `SessionsList`) displays every session known
 |------|---------|
 | `contrib/sessions/browser/views/sessionsView.ts` | `SessionsView` — ViewPane with header, new-session button, sort/group/filter persistence |
 | `contrib/sessions/browser/views/sessionsList.ts` | `SessionsList` — tree control, grouping/filtering logic, menu IDs, context keys |
-| `contrib/sessions/browser/views/sessionsListModelService.ts` | `ISessionsListModelService` — pin/read state (UI-only, not synced to providers) |
+| `services/sessions/browser/sessionsListModelService.ts` | `ISessionsListModelService` — pin/read state + shared status icon (UI-only, not synced to providers) |
 | `contrib/sessions/browser/views/sessionsViewActions.ts` | All registered actions (sort, group, filter, pin, archive, rename, navigate) |
 
 ---
@@ -59,7 +59,7 @@ Archived sessions always go to the "Done" section regardless of grouping mode. A
 When grouping by workspace, the list shows only **primary** workspace sections by default:
 
 - A workspace qualifies as primary if it has recent activity (last 4 days), matches the open window's folder, or contains the most recently updated session
-- Remaining workspaces collapse behind a "Show N more" toggle
+- Remaining workspaces collapse behind a "+N more workspaces" toggle
 - Within each workspace, sessions beyond 5 also show a "Show more" toggle
 - The find widget bypasses all capping
 
@@ -85,11 +85,30 @@ A built-in find widget filters the list by session title and section label. When
 
 Pinned sessions appear in a dedicated "Pinned" section at the top. Pin state is managed by `ISessionsListModelService` and persisted locally (not synced to providers).
 
+### Manual Reordering (Drag & Drop)
+
+Regular sessions can be reordered by dragging them up or down within the list. Pinned sessions can be reordered within the Pinned section. An insertion line is shown between rows while dragging.
+
+- **Storage** — reordering stores a synthetic numeric *sort key* per session in `ISessionsListModelService` (persisted locally, not synced). It is used **only** for sorting; the provider's real `createdAt`/`updatedAt` are never modified. A separate override map is kept for each sort mode (Created vs Updated).
+- **Sort key** — on drop, the new key is the midpoint between the effective keys of the sessions immediately above and below the drop point. Dropping above the first session uses the current time (so it sorts to the top). Dropping below the last session steps below the last key.
+- **Dropping the fake value** — if a session's natural timestamp already sorts it into the dropped slot (e.g. after dragging it down and back), the stored override is removed so the list falls back to natural ordering.
+- **Grouping by Date** — the regular list is one continuous sequence, so dragging can move a session across date buckets (e.g. to the top makes it "Today").
+- **Grouping by Workspace** — reordering is restricted to within the same workspace group; drops onto another workspace are rejected.
+- **Pinned** — dropping a non-archived session on the Pinned header pins it and lets it sort naturally. Dropping it on a pinned session shows an insertion line, pins it, and stores the sort key needed to place it at that location.
+- **User groups** — dropping a non-archived session on a group header adds or moves it into the group and lets it sort naturally. Dropping it on a session inside the group shows an insertion line for the exact slot and highlights only the group header to indicate the receiving group.
+- **Scope** — archived (Done) sessions do not reorder or move into groups. Drops onto the Done section, unsupported section headers, and "show more" rows are rejected.
+- **Multi-selection** — dragging multiple selected sessions moves them as a contiguous block, preserving their relative order. The drag label reads `"N sessions"`. Dragging sessions into the sessions grid opens all of them.
+
+The insertion line relies on the base list widget's `drop-target-before`/`drop-target-after` feedback (colored by `list.dropBetweenBackground`). The widget converts an "after" indicator on row *i* into a "before" indicator on row *i+1*, so hovering the bottom half of the upper row and the top half of the lower row render the exact same DOM line with no shift.
+
+Archived sessions do not show the session group context menu actions ("Create Group", "Add to Group", "Move to Group", or "Remove from Group").
+
 ### Read / Unread
 
 - Sessions start as **unread**
 - A session becomes **read** when the user opens it or explicitly marks it
 - A session becomes **unread** when it completes in the background (transitions from InProgress to a terminal status while not active)
+- Pin and read state are cleaned up when a provider reports a real session removal; remote agent host disconnects hide cached sessions without reporting them as removed
 
 ### Navigation
 
@@ -123,7 +142,7 @@ The sessions list defines menu IDs that contributions can target to add actions.
 
 | Menu | Constant | Where it appears | Use for |
 |------|----------|------------------|---------|
-| `SessionSectionToolbar` | `SessionSectionToolbarMenuId` | Toolbar on section headers (Pinned, workspace groups, Done) | Section-scoped actions like "New Session for Workspace", "Archive All", "Restore All". |
+| `SessionSectionToolbar` | `SessionSectionToolbarMenuId` | Toolbar on section headers (Pinned, workspace groups, Done) | Section-scoped actions like "New Session for Workspace" and "Mark All as Done". The Done section restores sessions individually (or via multi-selection) rather than with a section-wide action. Section headers also show a collapsible chevron on hover/focus; the chevron uses the same ghost icon hover background token as toolbar icon buttons. |
 
 ### View Title Menus
 
@@ -145,7 +164,7 @@ registerAction2(class MySessionAction extends Action2 {
             menu: {
                 id: SessionItemContextMenuId,
                 group: '1_edit',
-                when: ContextKeyExpr.equals('chatSessionType', 'my-session-type'),
+                when: ContextKeyExpr.equals('sessionType', 'my-session-type'),
             },
         });
     }
@@ -166,11 +185,11 @@ Context keys available for `when` clauses when contributing to session list menu
 | Key | Type | Description |
 |-----|------|-------------|
 | `sessionItem.isPinned` | boolean | Whether the session is pinned |
-| `sessionItem.isArchived` | boolean | Whether the session is archived |
-| `sessionItem.isRead` | boolean | Whether the session has been read |
+| `sessionIsArchived` | boolean | Whether the session is archived |
+| `sessionIsRead` | boolean | Whether the session has been read |
 | `sessionItem.hasBranchName` | boolean | Whether the session has a git branch name |
-| `chatSessionType` | string | Session type ID (use to scope actions to specific providers) |
-| `ChatSessionProviderIdContext` | string | Provider ID |
+| `sessionType` | string | Session type ID (use to scope actions to specific providers) |
+| `sessionProviderId` | string | Provider ID |
 
 ### Per-Section
 
@@ -184,3 +203,4 @@ Context keys available for `when` clauses when contributing to session list menu
 |-----|------|-------------|
 | `sessionsViewPane.grouping` | string | Current grouping mode (`'workspace'` or `'date'`) |
 | `sessionsViewPane.sorting` | string | Current sorting mode (`'created'` or `'updated'`) |
+| `sessionsViewPane.workspaceGroupCapped` | boolean | Whether workspace groups are capped (primary-only) or fully expanded |
