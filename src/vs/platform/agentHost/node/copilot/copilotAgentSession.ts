@@ -27,7 +27,7 @@ import { ITelemetryService } from '../../../telemetry/common/telemetry.js';
 import { AgentHostConfigKey, agentHostCustomizationConfigSchema } from '../../common/agentHostCustomizationConfig.js';
 import type { ChatInputRequestWithPlanReview, IAgentHostPlanReviewAction } from '../../common/agentHostPlanReview.js';
 import { AgentHostSandboxConfigKey, sandboxConfigSchema } from '../../common/sandboxConfigSchema.js';
-import { platformSessionSchema } from '../../common/agentHostSchema.js';
+import { AgentHostGlobalAutoApproveEnabledConfigKey, platformRootSchema, platformSessionSchema } from '../../common/agentHostSchema.js';
 import { AgentSignal, IMcpNotification, IRestoredSubagentSession } from '../../common/agentService.js';
 import { stripRedundantCdPrefix } from '../../common/commandLineHelpers.js';
 import { toToolCallMeta, type IToolCallMeta, type IToolCallUiMeta } from '../../common/meta/agentToolCallMeta.js';
@@ -37,7 +37,7 @@ import { SessionConfigKey } from '../../common/sessionConfigKeys.js';
 import { isAgentFeedbackAnnotationsAttachment, renderAgentFeedbackAnnotationsAttachment } from '../../common/meta/agentFeedbackAttachments.js';
 import { ISessionDatabase, ISessionDataService, SESSION_ATTACHMENTS_DIRNAME } from '../../common/sessionDataService.js';
 import { MessageAttachmentKind, ToolCallContributorKind, type FileEdit, type MessageAttachment } from '../../common/state/protocol/state.js';
-import { ActionType, type ChatAction, type SessionAction } from '../../common/state/sessionActions.js';
+import { ActionType, isChatAction, type ChatAction, type SessionAction } from '../../common/state/sessionActions.js';
 import { MessageKind, ResponsePartKind, ChatInputAnswerState, ChatInputAnswerValueKind, ChatInputQuestionKind, ChatInputResponseKind, ToolCallConfirmationReason, ToolCallStatus, ToolResultContentType, buildSubagentSessionUri, getToolSubagentContent, type PendingMessage, type ChatInputAnswer, type ChatInputOption, type ChatInputQuestion, type ChatInputRequest, type ToolCallResult, type ToolResultContent, type Turn, type UsageInfo, type UsageInfoMeta } from '../../common/state/sessionState.js';
 import { IAgentConfigurationService } from '../agentConfigurationService.js';
 import type { IExitPlanModeResponse } from './copilotAgent.js';
@@ -48,7 +48,7 @@ import { PendingRequestRegistry } from '../../common/pendingRequestRegistry.js';
 import { buildCopilotSystemNotification } from './copilotSystemNotification.js';
 import { parseLeadingSlashCommand } from './copilotSlashCommandCompletionProvider.js';
 import type { IUnsandboxedCommandConfirmationRequest, ShellManager } from './copilotShellTools.js';
-import { buildSandboxConfigForSdk } from './sandboxConfigForSdk.js';
+import { buildSandboxConfigForSdk, type ISdkSandboxConfig } from './sandboxConfigForSdk.js';
 import type { IAgentServerToolHost } from '../../common/agentServerTools.js';
 import { getEditFilePaths, getInvocationMessage, getPastTenseMessage, getPermissionDisplay, getShellLanguage, getSubagentMetadata, getTaskCompleteMarkdown, getToolDisplayName, getToolInputString, getToolKind, isEditTool, isHiddenTool, isShellTool, isTaskCompleteTool, synthesizeSkillToolCall, tryStringify, type ITypedPermissionRequest } from './copilotToolDisplay.js';
 import { FileEditTracker } from '../shared/fileEditTracker.js';
@@ -305,6 +305,7 @@ function isCopilotSdkToolOutputTempFile(filePath: string, tmpDir: string): boole
  */
 export interface ICopilotAgentSessionOptions {
 	readonly sessionUri: URI;
+	readonly chatChannelUri: URI;
 	readonly rawSessionId: string;
 	readonly onDidSessionProgress: Emitter<AgentSignal>;
 	readonly sessionLauncher: ICopilotSessionLauncher;
@@ -340,6 +341,13 @@ export interface ICopilotAgentSessionOptions {
 	 * the future) and exposes SDK tool handlers that execute them in-process.
 	 */
 	readonly serverToolHost?: IAgentServerToolHost;
+
+	/**
+	 * Platform used to compute the SDK sandbox policy. Defaults to
+	 * `process.platform`; injectable so tests can exercise the per-OS gating
+	 * (notably that the sandbox is ignored on Windows) deterministically.
+	 */
+	readonly platform?: NodeJS.Platform;
 }
 
 /**
@@ -419,6 +427,7 @@ class CopilotTurn {
 export class CopilotAgentSession extends Disposable {
 	readonly sessionId: string;
 	readonly sessionUri: URI;
+	private readonly _chatChannelUri: URI;
 
 	/** Working directory this session operates in, if any. */
 	get workingDirectory(): URI | undefined { return this._workingDirectory; }
@@ -560,6 +569,9 @@ export class CopilotAgentSession extends Disposable {
 	/** Tracks whether a non-empty activity has been published, so we only emit a clear when needed. */
 	private _hasReportedActivity = false;
 
+	/** Platform used to compute the SDK sandbox policy (injectable for tests). */
+	private readonly _platform: NodeJS.Platform;
+
 	constructor(
 		options: ICopilotAgentSessionOptions,
 		@IInstantiationService private readonly _instantiationService: IInstantiationService,
@@ -573,6 +585,7 @@ export class CopilotAgentSession extends Disposable {
 		super();
 		this.sessionId = options.rawSessionId;
 		this.sessionUri = options.sessionUri;
+		this._chatChannelUri = options.chatChannelUri;
 		this._onDidSessionProgress = options.onDidSessionProgress;
 		this._sessionLauncher = options.sessionLauncher;
 		this._launchPlan = options.launchPlan;
@@ -580,6 +593,7 @@ export class CopilotAgentSession extends Disposable {
 		this._workingDirectory = options.workingDirectory;
 		this._customizationDirectory = options.customizationDirectory;
 		this._serverToolHost = options.serverToolHost;
+		this._platform = options.platform ?? process.platform;
 
 		this._appliedSnapshot = options.clientSnapshot ?? { tools: [], plugins: [], mcpServers: {} };
 		this._clientToolNames = clientToolNamesFromSnapshot(this._appliedSnapshot);
@@ -640,10 +654,11 @@ export class CopilotAgentSession extends Disposable {
 	// ---- AgentSignal helpers ------------------------------------------------
 
 	/** Wraps a {@link SessionAction} in an {@link AgentSignal} envelope and emits it. */
+	/** todo@connor4312: AHP is missing a chat activity update action which is needed to drop `SessionAction` here */
 	private _emitAction(action: SessionAction | ChatAction, parentToolCallId?: string): void {
 		this._onDidSessionProgress.fire({
 			kind: 'action',
-			session: this.sessionUri,
+			resource: isChatAction(action) ? this._chatChannelUri : this.sessionUri,
 			action,
 			parentToolCallId,
 		});
@@ -708,7 +723,7 @@ export class CopilotAgentSession extends Disposable {
 		for (const id of ids) {
 			this._onDidSessionProgress.fire({
 				kind: 'steering_consumed',
-				session: this.sessionUri,
+				chat: this._chatChannelUri,
 				id,
 			});
 		}
@@ -933,14 +948,13 @@ export class CopilotAgentSession extends Disposable {
 		if (!host) {
 			return [];
 		}
-		const sessionUri = this.sessionUri.toString();
 		return host.definitions.map(def => ({
 			name: def.name,
 			description: def.description ?? '',
 			parameters: def.inputSchema ?? { type: 'object' as const, properties: {} },
 			handler: async (args: Record<string, unknown>): Promise<ToolResultObject> => {
 				try {
-					const text = host.executeTool(sessionUri, def.name, args);
+					const text = host.executeTool(this._chatChannelUri.toString(), def.name, args);
 					return { textResultForLlm: text, resultType: 'success' };
 				} catch (error) {
 					const message = error instanceof Error ? error.message : String(error);
@@ -1125,6 +1139,7 @@ export class CopilotAgentSession extends Disposable {
 		}
 
 		await this.applyMode(mode);
+		await this._applyEffectiveSandboxConfig();
 		await this._wrapper.session.send({ prompt, attachments: sdkAttachments?.length ? sdkAttachments : undefined });
 		this._logService.info(`[Copilot:${this.sessionId}] session.send() returned`);
 	}
@@ -1465,7 +1480,12 @@ export class CopilotAgentSession extends Disposable {
 		} catch {
 			// Database may not exist yet — that's fine
 		}
-		const result = await mapSessionEvents(this.sessionUri, db, events, this._workingDirectory);
+		const result = await mapSessionEvents(this.sessionUri, db, events, {
+			workingDirectory: this._workingDirectory,
+			model: this._launchPlan.kind === 'create'
+				? this._launchPlan.model
+				: this._launchPlan.fallback.model,
+		});
 		return result;
 	}
 
@@ -1681,7 +1701,13 @@ export class CopilotAgentSession extends Disposable {
 			const deferred = new DeferredPromise<boolean>();
 			this._pendingPermissions.set(toolCallId, deferred);
 
-			if (isShellRequest && await this._isShellSandboxedByDefault()) {
+			// Auto-approve shell commands that run sandboxed by default, since the
+			// sandbox already contains them. Commands that opted OUT of the sandbox
+			// (`requestSandboxBypass`) are an elevation of privilege and must
+			// fall through to the normal confirmation flow — otherwise enabling
+			// `sandbox.allowBypass` would let the model escape the sandbox with no
+			// prompt at all.
+			if (isShellRequest && !request.requestSandboxBypass && await this._isShellSandboxedByDefault()) {
 				// Session may have been disposed while we awaited the engine
 				// check; if so the deferred has already been settled and
 				// removed, so leave it alone.
@@ -1720,7 +1746,7 @@ export class CopilotAgentSession extends Disposable {
 			const parentToolCallId = this._activeToolCalls.get(toolCallId)?.parentToolCallId;
 			this._onDidSessionProgress.fire({
 				kind: 'pending_confirmation',
-				session: this.sessionUri,
+				chat: this._chatChannelUri,
 				state: {
 					status: ToolCallStatus.PendingConfirmation,
 					toolCallId,
@@ -1733,6 +1759,7 @@ export class CopilotAgentSession extends Disposable {
 				},
 				permissionKind,
 				permissionPath,
+				requestSandboxBypass: request.requestSandboxBypass,
 				parentToolCallId,
 			});
 
@@ -1786,16 +1813,16 @@ export class CopilotAgentSession extends Disposable {
 	 * terminal tool is enabled) or through the SDK's built-in shell tool wrapped
 	 * by the `sandboxConfig` we pushed via `session.options.update`.
 	 *
-	 * In both cases the shell tool prompts on its own when escalating to
-	 * unsandboxed execution, so the SDK's pre-call `shell` permission prompt
-	 * is redundant and we auto-approve it.
+	 * Callers use this to auto-approve shell permission prompts that the sandbox
+	 * already contains. Commands that explicitly opt out of the sandbox
+	 * (`requestSandboxBypass`) are excluded by the caller, since the
+	 * sandbox no longer contains them.
 	 *
 	 * Returns false when neither sandbox path is configured, so the standard
 	 * confirmation flow is preserved.
 	 */
 	private async _isShellSandboxedByDefault(): Promise<boolean> {
-		const customTerminalToolEnabled = this._configurationService.getRootValue(agentHostCustomizationConfigSchema, AgentHostConfigKey.EnableCustomTerminalTool) === true;
-		if (customTerminalToolEnabled) {
+		if (this._isCustomTerminalToolEnabled()) {
 			if (!this._shellManager) {
 				return false;
 			}
@@ -1804,8 +1831,74 @@ export class CopilotAgentSession extends Disposable {
 		// SDK-managed shell path: gate on the same host config that
 		// `CopilotSessionLauncher` reads when forwarding `sandboxConfig` to
 		// the SDK, so the two stay in lock-step.
+		return this._computeSdkSandboxConfig() !== undefined;
+	}
+
+	/**
+	 * `true` when the AgentHost's own shell tools (wrapped by
+	 * {@link TerminalSandboxEngine}) replace the SDK's built-in shell. In that
+	 * mode the SDK sandbox config is unused, so we neither forward nor toggle it.
+	 */
+	private _isCustomTerminalToolEnabled(): boolean {
+		return this._configurationService.getRootValue(agentHostCustomizationConfigSchema, AgentHostConfigKey.EnableCustomTerminalTool) === true;
+	}
+
+	/**
+	 * The SDK-shaped sandbox policy for this session, mirroring
+	 * {@link CopilotSessionLauncher}'s computation: `undefined` when the custom
+	 * terminal tool is enabled (the host's own terminal sandbox engine handles
+	 * containment) or when the host sandbox config evaluates to disabled
+	 * (including on Windows, where the sandbox is not supported).
+	 */
+	private _computeSdkSandboxConfig(): ISdkSandboxConfig | undefined {
+		if (this._isCustomTerminalToolEnabled()) {
+			return undefined;
+		}
 		const sandbox = this._configurationService.getRootValue(sandboxConfigSchema, AgentHostSandboxConfigKey.Sandbox);
-		return buildSandboxConfigForSdk(process.platform, sandbox) !== undefined;
+		return buildSandboxConfigForSdk(this._platform, sandbox);
+	}
+
+	/**
+	 * `true` when the session runs with bypass approvals — the global
+	 * auto-approve setting, the session's `autoApprove` ("Bypass Approvals")
+	 * level, or `autopilot` mode (which runs autonomously with no user to
+	 * confirm and therefore implies a disabled sandbox). The sandbox enable
+	 * setting only applies under default approvals, so the sandbox is disabled
+	 * for the request when this is `true`.
+	 */
+	private _isBypassApprovals(): boolean {
+		if (this._configurationService.getRootValue(platformRootSchema, AgentHostGlobalAutoApproveEnabledConfigKey) === true) {
+			return true;
+		}
+		if (this._isAutopilotMode()) {
+			return true;
+		}
+		return this._configurationService.getEffectiveValue(this.sessionUri.toString(), platformSessionSchema, SessionConfigKey.AutoApprove) === 'autoApprove';
+	}
+
+	/**
+	 * Apply the SDK sandbox policy for the request that is about to be sent.
+	 *
+	 * Skips the SDK sandbox entirely when the custom terminal tool is enabled
+	 * (the host's own terminal sandbox engine handles containment and the SDK's
+	 * built-in shell is unused). Otherwise it always pushes the effective state
+	 * so the SDK never retains a stale or auto-discovered sandbox: the
+	 * configured policy under default approvals, or an explicitly disabled
+	 * sandbox when the request runs with bypass approvals or no sandbox is
+	 * configured (setting off, or Windows).
+	 */
+	private async _applyEffectiveSandboxConfig(): Promise<void> {
+		if (this._isCustomTerminalToolEnabled()) {
+			return;
+		}
+		const sandbox = this._configurationService.getRootValue(sandboxConfigSchema, AgentHostSandboxConfigKey.Sandbox);
+		const base = buildSandboxConfigForSdk(this._platform, sandbox);
+		const sandboxConfig: ISdkSandboxConfig | { enabled: false } = (base && !this._isBypassApprovals()) ? base : { enabled: false };
+		try {
+			await this._wrapper.session.rpc.options.update({ sandboxConfig });
+		} catch (err) {
+			this._logService.warn(`[Copilot:${this.sessionId}] Failed to update sandbox config for request`, err);
+		}
 	}
 
 	/**
@@ -1896,9 +1989,10 @@ export class CopilotAgentSession extends Disposable {
 				? localize('agentHost.unsandboxedCommandConfirmation.blockedDomains', "This command needs to access blocked network domain(s): {0}.", blockedDomains)
 				: localize('agentHost.unsandboxedCommandConfirmation.generic', "This command needs to run outside the sandbox.");
 
+		const parentToolCallId = this._activeToolCalls.get(request.toolCallId)?.parentToolCallId;
 		this._onDidSessionProgress.fire({
 			kind: 'pending_confirmation',
-			session: this.sessionUri,
+			chat: this._chatChannelUri,
 			state: {
 				status: ToolCallStatus.PendingConfirmation,
 				toolCallId: request.toolCallId,
@@ -1914,7 +2008,7 @@ export class CopilotAgentSession extends Disposable {
 			// Mirrors the workbench's sandbox-aware analyzer, which forces
 			// `isAutoApproveAllowed: false` whenever `requiresUnsandboxConfirmation`
 			// is set.
-			parentToolCallId: this._activeToolCalls.get(request.toolCallId)?.parentToolCallId,
+			parentToolCallId,
 		});
 
 		return deferred.p;
@@ -2684,7 +2778,7 @@ export class CopilotAgentSession extends Disposable {
 			this._logService.info(`[Copilot:${sessionId}] Subagent started: toolCallId=${e.data.toolCallId}, agent=${e.data.agentName}`);
 			this._onDidSessionProgress.fire({
 				kind: 'subagent_started',
-				session: this.sessionUri,
+				chat: this._chatChannelUri,
 				toolCallId: e.data.toolCallId,
 				agentName: e.data.agentName,
 				agentDisplayName: e.data.agentDisplayName,
@@ -3037,7 +3131,7 @@ export class CopilotAgentSession extends Disposable {
 
 		this._onDidSessionProgress.fire({
 			kind: 'action',
-			session: this.sessionUri,
+			resource: this._chatChannelUri,
 			action: {
 				type: ActionType.ChatInputRequested,
 				request: inputRequest,
@@ -3200,7 +3294,7 @@ export class CopilotAgentSession extends Disposable {
 			this._logService.trace(`[Copilot:${sessionId}] Subagent completed: ${e.data.agentName}`);
 			this._onDidSessionProgress.fire({
 				kind: 'subagent_completed',
-				session: this.sessionUri,
+				chat: this._chatChannelUri,
 				toolCallId: e.data.toolCallId,
 			});
 		}));
@@ -3212,7 +3306,7 @@ export class CopilotAgentSession extends Disposable {
 			this._logService.error(`[Copilot:${sessionId}] Subagent failed: ${e.data.agentName} - ${e.data.error}`);
 			this._onDidSessionProgress.fire({
 				kind: 'subagent_completed',
-				session: this.sessionUri,
+				chat: this._chatChannelUri,
 				toolCallId: e.data.toolCallId,
 			});
 		}));
